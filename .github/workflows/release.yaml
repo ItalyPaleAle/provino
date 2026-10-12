@@ -14,30 +14,17 @@ permissions:
   id-token: write
 
 jobs:
-  # provino links against libvips through cgo, so the image compiles the binary inside the build rather than copying in one built on the runner
-  # That also makes it a container-only release: the binary is dynamically linked, so there are no standalone archives to publish alongside it
-  container:
-    name: Container image
+  # The tags, labels, and build information are computed once, so the image of every architecture carries the same build date
+  metadata:
+    name: Image metadata
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      json: ${{ steps.meta.outputs.json }}
+      labels: ${{ steps.meta.outputs.labels }}
+      ldflags: ${{ steps.vars.outputs.ldflags }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # A cgo build runs on the architecture it targets, so the arm64 image is compiled under emulation
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        with:
-          platforms: arm64
-          # Do not cache in release workflows
-          cache-image: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          # Do not cache in release workflows
-          cache-binary: false
-
       # Lowercase REPO_OWNER which is required for containers
       - name: Set lowercase REPO_OWNER
         run: |
@@ -47,6 +34,9 @@ jobs:
       - name: Generate container tags and labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # The annotations go on the multi-arch index that the tags point at, which is the manifest the registry shows
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ghcr.io/${{ env.REPO_OWNER }}/provino
           tags: |
@@ -56,6 +46,7 @@ jobs:
             type=semver,pattern=v{{major}}
 
       - name: Set variables
+        id: vars
         run: |
           BUILD_ID=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
           BUILD_VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
@@ -70,9 +61,35 @@ jobs:
           BUILDINFO_PKG="github.com/italypaleale/provino/internal/buildinfo"
           BUILD_LDFLAGS="-X ${BUILDINFO_PKG}.Production=1 -X ${BUILDINFO_PKG}.AppVersion=${BUILD_VERSION} -X ${BUILDINFO_PKG}.BuildId=${BUILD_ID} -X ${BUILDINFO_PKG}.BuildDate=${BUILD_DATE} -X ${BUILDINFO_PKG}.CommitHash=${COMMIT_HASH} -buildid=${BUILD_ID}"
 
-          echo "BUILD_LDFLAGS=$BUILD_LDFLAGS" >> $GITHUB_ENV
+          echo "ldflags=$BUILD_LDFLAGS" >> $GITHUB_OUTPUT
+          echo "image=ghcr.io/${REPO_OWNER}/provino" >> $GITHUB_OUTPUT
 
           echo "BUILD_LDFLAGS: '$BUILD_LDFLAGS'"
+
+  # provino links against libvips through cgo, so the image compiles the binary inside the build rather than copying in one built on the runner
+  # That also makes it a container-only release: the binary is dynamically linked, so there are no standalone archives to publish alongside it
+  # A cgo build runs on the architecture it targets, so each architecture is built on a runner of its own, which is far faster than compiling under emulation
+  container:
+    name: Container image (${{ matrix.platform }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Do not cache in release workflows
+          cache-binary: false
 
       - name: Login to container registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -81,26 +98,106 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The image is pushed by digest alone: the manifest job tags the index that combines every architecture
       - name: Build and push Container image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: docker-build-push
         with:
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # The arm64 leg compiles libvips-linked code under QEMU (slow)
-          platforms: linux/amd64
+          outputs: type=image,name=${{ needs.metadata.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ needs.metadata.outputs.labels }}
+          platforms: ${{ matrix.platform }}
           context: .
           file: Dockerfile
           build-args: |
-            BUILD_LDFLAGS=${{ env.BUILD_LDFLAGS }}
-          push: true
+            BUILD_LDFLAGS=${{ needs.metadata.outputs.ldflags }}
+
+      # Each digest is passed on as the name of an empty file, which is all the manifest job needs to find the image
+      - name: Export the digest
+        run: |
+          DIGEST="${{ steps.docker-build-push.outputs.digest }}"
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+          PLATFORM="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> $GITHUB_ENV
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the image of every architecture into the multi-arch index each tag points at
+  manifest:
+    name: Multi-arch image
+    needs: [metadata, container]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Do not cache in release workflows
+          cache-binary: false
+
+      - name: Login to container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch image
+        id: index
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.metadata.outputs.image }}
+          METADATA: ${{ needs.metadata.outputs.json }}
+        run: |
+          set -eo pipefail
+
+          # Every tag and annotation is an argument of its own, since the annotations contain spaces
+          ARGS=()
+          while IFS= read -r TAG; do
+            ARGS+=(--tag "$TAG")
+          done < <(jq -r '.tags[]' <<< "$METADATA")
+          while IFS= read -r ANNOTATION; do
+            ARGS+=(--annotation "$ANNOTATION")
+          done < <(jq -r '.annotations[]' <<< "$METADATA")
+
+          # Every file in this folder is named after the digest of one architecture's image
+          for DIGEST in *; do
+            ARGS+=("${IMAGE}@sha256:${DIGEST}")
+          done
+
+          docker buildx imagetools create "${ARGS[@]}"
+
+          # The attestation is for the index, since that is what every tag resolves to
+          INDEX_DIGEST=$(docker buildx imagetools inspect "$(jq -r '.tags[0]' <<< "$METADATA")" --format '{{json .Manifest}}' | jq -r .digest)
+          if [[ -z "$INDEX_DIGEST" || "$INDEX_DIGEST" == "null" ]]; then
+            echo "Failed to determine the digest of the multi-arch image"
+            exit 1
+          fi
+
+          echo "digest=$INDEX_DIGEST" >> $GITHUB_OUTPUT
+
+          echo "INDEX_DIGEST: '$INDEX_DIGEST'"
 
       - name: Container image attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/provino'
-          subject-digest: ${{ steps.docker-build-push.outputs.digest }}
+          subject-name: ${{ needs.metadata.outputs.image }}
+          subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
 
   helm-chart:
@@ -109,7 +206,7 @@ jobs:
     timeout-minutes: 10
 
     # The chart pulls the image tagged with its appVersion, so it is only published once that image exists
-    needs: container
+    needs: manifest
     if: startsWith(github.ref, 'refs/tags/v')
 
     env:

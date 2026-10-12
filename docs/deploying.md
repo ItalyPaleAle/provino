@@ -2,7 +2,7 @@
 
 ## The container image
 
-Release images are published at `ghcr.io/italypaleale/provino`. To build one yourself:
+Release images are published at `ghcr.io/italypaleale/provino`, for `linux/amd64` and `linux/arm64`. To build one yourself:
 
 ```sh
 docker build -t provino .

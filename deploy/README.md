@@ -11,7 +11,7 @@ Both run the container as the uid 65532 the image was built for, with a read-onl
 
 The release workflow pushes `ghcr.io/italypaleale/provino`, which is the name both files point at. A push to `main` publishes `:edge`; a `v*` tag publishes `:vX.Y.Z`, `:vX.Y`, `:vX` and `:latest`, so both files as written track the most recent release.
 
-Releases publish the image for `linux/amd64` only. On another architecture, build it from the repository root with `docker build -t provino .` and point the file you use at that tag.
+The image is published for `linux/amd64` and `linux/arm64`, and every tag covers both, so the engine pulls the one that matches the host.
 
 ## Docker Compose
 
