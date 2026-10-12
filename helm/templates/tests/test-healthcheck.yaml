@@ -1,0 +1,51 @@
+{{- include "provino.validateValues" . -}}
+{{/*
+Requests the health endpoint through the Service, which proves that a replica is serving and that the Service routes to it
+It runs the curl the image carries for its own HEALTHCHECK, so it pulls nothing the release doesn't already use
+Run it with: helm test <release>
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "provino.fullname" . }}-test-healthcheck
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provino.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  automountServiceAccountToken: false
+  {{- with .Values.podSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: healthcheck
+      image: {{ include "provino.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      command:
+        - /usr/bin/curl
+      args:
+        - --fail
+        - --silent
+        - --show-error
+        - --max-time
+        - "10"
+        {{- if include "provino.config.usesTLS" . }}
+        {{- /* The certificate is issued for the public name, not for the Service's */}}
+        - --insecure
+        {{- end }}
+        - {{ printf "%s://%s.%s.svc:%d/healthz" (ternary "https" "http" (eq (include "provino.config.usesTLS" .) "true")) (include "provino.fullname" .) .Release.Namespace (int .Values.service.port) | quote }}

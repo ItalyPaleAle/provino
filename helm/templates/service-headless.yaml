@@ -1,0 +1,33 @@
+{{- include "provino.validateValues" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "provino.headlessServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provino.labels" . | nindent 4 }}
+  {{- if or .Values.service.headless.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.service.headless.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  {{- /* Each replica keeps its DNS name while it is starting up */}}
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ int .Values.ports.http }}
+      targetPort: http
+      protocol: TCP
+    - name: peers
+      port: {{ int .Values.ports.peers }}
+      targetPort: peers
+      protocol: UDP
+  selector:
+    {{- include "provino.selectorLabels" . | nindent 4 }}

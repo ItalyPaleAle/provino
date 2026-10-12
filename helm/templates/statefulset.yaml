@@ -1,0 +1,236 @@
+{{- include "provino.validateValues" . -}}
+{{- $persistence := .Values.persistence -}}
+{{- $useVolumeClaimTemplate := and $persistence.enabled (not $persistence.existingClaim) -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "provino.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provino.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ int .Values.replicaCount }}
+  serviceName: {{ include "provino.headlessServiceName" . }}
+  podManagementPolicy: {{ .Values.podManagementPolicy }}
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "provino.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "provino.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (not .Values.existingConfigSecret) .Values.commonAnnotations .Values.podAnnotations }}
+      annotations:
+        {{- if not .Values.existingConfigSecret }}
+        {{- /* Rolls the pods whenever the rendered configuration changes */}}
+        checksum/config: {{ include "provino.configFile" . | sha256sum }}
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "provino.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if eq .Values.podAntiAffinity "soft" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "provino.selectorLabels" . | nindent 20 }}
+      {{- else if eq .Values.podAntiAffinity "hard" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "provino.selectorLabels" . | nindent 18 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: provino
+          image: {{ include "provino.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ int .Values.ports.http }}
+              protocol: TCP
+            {{- /* Francis speaks WebTransport over HTTP/3, which runs on QUIC, so the peer port is UDP */}}
+            - name: peers
+              containerPort: {{ int .Values.ports.peers }}
+              protocol: UDP
+          env:
+            - name: PROVINO_CONFIG
+              value: /etc/provino/config.yaml
+            {{- /* Every pod advertises its own IP to the other actor hosts, which is why the address comes from the environment rather than from the shared config file */}}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PROVINO_ACTORS_ADDRESS
+              value: {{ printf "$(POD_IP):%d" (int .Values.ports.peers) | quote }}
+            {{- if .Values.openTelemetry.enabled }}
+            {{- include "provino.openTelemetryEnv" . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- include "provino.probe" (dict "context" . "probe" .Values.startupProbe) | nindent 12 }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- include "provino.probe" (dict "context" . "probe" .Values.livenessProbe) | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- include "provino.probe" (dict "context" . "probe" .Values.readinessProbe "successThreshold" true) | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/provino
+              readOnly: true
+            {{- /* provino's defaults are relative to the image's working directory, /var/lib/provino, so they all land in here */}}
+            - name: data
+              mountPath: /var/lib/provino/data
+            - name: tmp
+              mountPath: /tmp
+            {{- range .Values.projectedServiceAccountTokens }}
+            - name: {{ printf "token-%s" .name | quote }}
+              mountPath: {{ .mountPath | quote }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "provino.configSecretName" . }}
+            {{- /* Read-only for everyone: the file is owned by root, so a narrower mode would keep the non-root user from reading it */}}
+            defaultMode: 0444
+            items:
+              - key: {{ include "provino.configSecretKey" . | quote }}
+                path: config.yaml
+        - name: tmp
+          emptyDir:
+            {{- if or .Values.tmp.medium .Values.tmp.sizeLimit }}
+            {{- with .Values.tmp.medium }}
+            medium: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.tmp.sizeLimit }}
+            sizeLimit: {{ . | quote }}
+            {{- end }}
+            {{- else }} {}
+            {{- end }}
+        {{- if not $useVolumeClaimTemplate }}
+        - name: data
+          {{- if $persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $persistence.existingClaim | quote }}
+          {{- else }}
+          {{- /* Persistence is disabled, so anything stored here lives for as long as the pod does */}}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- range .Values.projectedServiceAccountTokens }}
+        - name: {{ printf "token-%s" .name | quote }}
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .audience | quote }}
+                  expirationSeconds: {{ int (default 3600 .expirationSeconds) }}
+                  path: token
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  {{- if $useVolumeClaimTemplate }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- /* The claim template can't be changed once the StatefulSet exists, so it only carries the labels that never change between versions */}}
+        labels:
+          {{- include "provino.selectorLabels" . | nindent 10 }}
+        {{- if or $persistence.annotations .Values.commonAnnotations }}
+        annotations:
+          {{- with .Values.commonAnnotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+          {{- with $persistence.annotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml $persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $persistence.size | quote }}
+        {{- if $persistence.storageClass }}
+        {{- if eq "-" $persistence.storageClass }}
+        storageClassName: ""
+        {{- else }}
+        storageClassName: {{ $persistence.storageClass | quote }}
+        {{- end }}
+        {{- end }}
+  {{- end }}

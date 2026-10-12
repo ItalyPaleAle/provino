@@ -1,0 +1,51 @@
+# Compose file that runs a single provino instance
+#
+# Its configuration is compose.config.yaml, next to this file, mounted read-only at /etc/provino/config.yaml: edit it before the first start
+# Everything the service persists is in the provino-data volume: the uploaded originals, the generated variants, and the SQLite database the embedded actor runtime keeps its job state and alarms in
+# The container runs as the unprivileged user the image was built for, with a read-only root file system, every capability dropped, and no way to gain privileges
+
+name: provino
+
+services:
+  provino:
+    image: ghcr.io/italypaleale/provino:latest
+    restart: unless-stopped
+    ports:
+      # The container side is server.port, which defaults to 3000: changing that means changing it here and in the health check below
+      - "3000:3000"
+    environment:
+      PROVINO_CONFIG: /etc/provino/config.yaml
+    configs:
+      - source: provino-config
+        target: /etc/provino/config.yaml
+    volumes:
+      # Mounted at the image's working directory, which the image creates owned by the user it runs as
+      # A new volume takes the ownership of the directory it's first mounted on, which is what makes it writable by that user
+      - provino-data:/var/lib/provino
+      # The root file system is read-only, and two things need somewhere to write: every job caches the source image its variants are encoded from, and an object store reached over HTTP spools each upload to a temporary file
+      # It's a volume rather than a tmpfs, so a burst of uploads doesn't come out of memory, and everything in it can be downloaded again
+      - provino-tmp:/tmp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The image declares the same check, which is repeated here because it depends on the port above
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      # The first start migrates the actor database before the service answers
+      start_period: 60s
+      retries: 3
+    # Room for the actor host to shut down cleanly; jobs are durable, so whatever it interrupts resumes on the next start
+    stop_grace_period: 60s
+
+configs:
+  provino-config:
+    # A file rather than inline content, since Compose can only mount a file into a container with a read-only root file system
+    file: ./compose.config.yaml
+
+volumes:
+  provino-data:
+  provino-tmp:

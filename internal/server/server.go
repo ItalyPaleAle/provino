@@ -1,0 +1,360 @@
+package server
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	httpserver "github.com/italypaleale/go-kit/httpserver"
+	tlsconfig "github.com/italypaleale/go-kit/httpserver/tlsconfig"
+	sloghttp "github.com/samber/slog-http"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/sdk/trace"
+
+	provinoopenapi "github.com/italypaleale/provino/api/openapi"
+	"github.com/italypaleale/provino/internal/actors"
+	"github.com/italypaleale/provino/internal/auth"
+	"github.com/italypaleale/provino/internal/authorizer"
+	"github.com/italypaleale/provino/internal/config"
+	"github.com/italypaleale/provino/internal/imaging"
+	"github.com/italypaleale/provino/internal/metrics"
+	"github.com/italypaleale/provino/internal/notify"
+	"github.com/italypaleale/provino/internal/signing"
+	"github.com/italypaleale/provino/internal/sourcecache"
+	"github.com/italypaleale/provino/internal/store"
+)
+
+// SourceMeasurer reads the size of an image the way its variants see it, after its EXIF orientation
+type SourceMeasurer interface {
+	SourceSize(ctx context.Context, source []byte) (imaging.Resolution, error)
+}
+
+// Server is the API server
+type Server struct {
+	appSrv  *http.Server
+	handler http.Handler
+	running atomic.Bool
+	wg      sync.WaitGroup
+
+	appMetrics    *metrics.AppMetrics
+	traceProvider *trace.TracerProvider
+	jobs          actors.Jobs
+	rateLimiter   RateLimiter
+	store         *store.Store
+	sourceCache   *sourcecache.Cache
+	measurer      SourceMeasurer
+	authenticator auth.Authenticator
+	authorizer    authorizer.Authorizer
+	notifier      *notify.Notifier
+	jwks          []byte
+
+	// Method that forces a reload of TLS certificates from disk
+	tlsCertWatchFn tlsconfig.CertWatchFn
+
+	// TLS configuration for the app server
+	tlsConfig *tls.Config
+
+	// Listener for the app server
+	// This can be used for testing without having to start an actual TCP listener
+	appListener net.Listener
+}
+
+// NewServerOpts contains options for the NewServer method
+type NewServerOpts struct {
+	AppMetrics    *metrics.AppMetrics
+	TraceProvider *trace.TracerProvider
+
+	// Jobs queues jobs and reads their status
+	Jobs actors.Jobs
+	// Francis rate limiter protecting browser uploads
+	RateLimiter RateLimiter
+	// Store where the source images and the generated variants are kept
+	Store *store.Store
+	// Local cache an upload writes a copy of the source into, so the job that follows doesn't download it again
+	SourceCache *sourcecache.Cache
+	// Measures the uploaded images
+	Measurer SourceMeasurer
+	// Authenticates every caller
+	Authenticator auth.Authenticator
+	// Decides what a browser upload may do; nil disables browser uploads
+	Authorizer authorizer.Authorizer
+	// Webhook endpoints notifications are resolved against; nil when none are configured
+	Notifier *notify.Notifier
+	// Ed25519 signing keys, published as JWKS; nil when none are configured
+	SigningKeys *signing.KeySet
+}
+
+// NewServer creates a new Server object and initializes it
+func NewServer(opts NewServerOpts) (*Server, error) {
+	if opts.Jobs == nil {
+		return nil, errors.New("option Jobs is required")
+	}
+	if opts.RateLimiter == nil {
+		return nil, errors.New("option RateLimiter is required")
+	}
+	if opts.Store == nil {
+		return nil, errors.New("option Store is required")
+	}
+	if opts.SourceCache == nil {
+		return nil, errors.New("option SourceCache is required")
+	}
+	if opts.Measurer == nil {
+		return nil, errors.New("option Measurer is required")
+	}
+	if opts.Authenticator == nil {
+		return nil, errors.New("option Authenticator is required")
+	}
+
+	s := &Server{
+		appMetrics:    opts.AppMetrics,
+		traceProvider: opts.TraceProvider,
+		jobs:          opts.Jobs,
+		rateLimiter:   opts.RateLimiter,
+		store:         opts.Store,
+		sourceCache:   opts.SourceCache,
+		measurer:      opts.Measurer,
+		authenticator: opts.Authenticator,
+		authorizer:    opts.Authorizer,
+		notifier:      opts.Notifier,
+	}
+
+	// The key set doesn't change while the process runs, so it's encoded once
+	if opts.SigningKeys != nil {
+		var err error
+		s.jwks, err = opts.SigningKeys.JWKS()
+		if err != nil {
+			return nil, fmt.Errorf("failed to publish the signing keys: %w", err)
+		}
+	}
+
+	err := s.initAppServer()
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (s *Server) initAppServer() (err error) {
+	cfg := config.Get()
+
+	// If "tls.path" is empty, use the folder where the config file is located
+	tlsPath := cfg.Server.TLS.Path
+	if tlsPath == "" {
+		file := cfg.GetLoadedConfigPath()
+		if file != "" {
+			tlsPath = filepath.Dir(file)
+		}
+	}
+
+	// Load the TLS configuration
+	s.tlsConfig, s.tlsCertWatchFn, err = tlsconfig.Load(tlsPath, cfg.Server.TLS.CertPEM, cfg.Server.TLS.KeyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS configuration: %w", err)
+	}
+
+	mux := http.NewServeMux()
+
+	// Unauthenticated routes
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /.openapi", provinoopenapi.ServeHTTP)
+	mux.HandleFunc("GET /.openapi/{document}", provinoopenapi.ServeHTTP)
+	mux.HandleFunc("GET /.well-known/provino-keys.json", s.RouteJWKS)
+
+	unauthorized := errUnauthorized.WriteResponse
+	forbidden := errForbidden.WriteResponse
+	requireIngest := auth.Middleware(s.authenticator, cfg.Auth.Scopes.Ingest, unauthorized, forbidden)
+	requireServer := auth.Middleware(s.authenticator, cfg.Auth.Scopes.Server, unauthorized, forbidden)
+
+	// The public routes are the only ones browsers call, so they're the only ones that answer cross-origin requests
+	// Uploads are rate-limited after authentication, so the budget belongs to the caller, and before the body is read
+	public := http.NewServeMux()
+	if s.authorizer != nil {
+		public.Handle("POST /v1/public/ingest", requireIngest(s.middlewareRateLimit(http.HandlerFunc(s.RouteIngest))))
+	}
+	public.Handle("GET /v1/public/images/{namespace}/{imageId}/jobs/{jobId}", requireIngest(http.HandlerFunc(s.RoutePublicJobStatus)))
+	mux.Handle("/v1/public/", middlewareCORS(cfg.Server.CORSAllowedOrigins)(public))
+
+	// The client API is trusted with every namespace, so it's held to the server scope
+	mux.Handle("POST /v1/client/upload", requireServer(http.HandlerFunc(s.RouteUpload)))
+	mux.Handle("POST /v1/client/optimize", requireServer(http.HandlerFunc(s.RouteOptimize)))
+	mux.Handle("GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}", requireServer(http.HandlerFunc(s.RouteClientJobStatus)))
+
+	middlewares := make([]httpserver.Middleware, 0, 4)
+	middlewares = append(middlewares,
+		// Recover from panics
+		sloghttp.Recovery,
+		// Limit request bodies to what an upload of the maximum allowed size needs
+		// This is the max upload size plus some buffer for other parts of the request
+		// The upload itself is checked against the configured limit while it's being read, so this only stops a body that couldn't be valid in the first place
+		httpserver.MiddlewareMaxBodySize(cfg.Images.MaxUploadSize+(1<<20)),
+	)
+
+	filters := []sloghttp.Filter{
+		sloghttp.IgnoreStatus(http.StatusUnauthorized, http.StatusNotFound),
+	}
+	if cfg.Logs.OmitHealthChecks {
+		filters = append(filters,
+			func(w sloghttp.WrapResponseWriter, r *http.Request) bool {
+				return r.URL.Path != "/healthz"
+			},
+		)
+	}
+
+	middlewares = append(middlewares,
+		// Log requests
+		sloghttp.NewWithFilters(slog.Default(), filters...),
+	)
+
+	if s.traceProvider != nil {
+		middlewares = append(middlewares,
+			otelhttp.NewMiddleware("/"),
+		)
+	}
+
+	s.handler = httpserver.Use(mux, middlewares...)
+
+	return nil
+}
+
+// RouteJWKS serves the public keys of the Ed25519 keys this service signs with, so receivers can verify signatures and pick up rotated keys
+func (s *Server) RouteJWKS(w http.ResponseWriter, r *http.Request) {
+	if len(s.jwks) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set(httpserver.HeaderContentType, "application/jwk-set+json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(s.jwks)
+}
+
+// Write the response for a failed request, keeping the internal details out of it unless they're part of an API error
+func (s *Server) respondWithError(w http.ResponseWriter, r *http.Request, err error) {
+	apiErr, ok := errors.AsType[httpserver.ApiError](err)
+	if ok {
+		apiErr.WriteResponse(w, r)
+		return
+	}
+
+	slog.ErrorContext(r.Context(), "Failed to handle the request", slog.Any("error", err))
+	errInternal.WriteResponse(w, r)
+}
+
+// Run the web server
+// Note this function is blocking, and will return only when the server is shut down via context cancellation.
+func (s *Server) Run(ctx context.Context) error {
+	if !s.running.CompareAndSwap(false, true) {
+		return errors.New("server is already running")
+	}
+	defer s.running.Store(false)
+	defer s.wg.Wait()
+
+	// App server
+	s.wg.Add(1)
+	appSrvErrCh := make(chan error, 1)
+	err := s.startAppServer(ctx, appSrvErrCh)
+	if err != nil {
+		return fmt.Errorf("failed to start app server: %w", err)
+	}
+	defer func() {
+		// Handle graceful shutdown
+		defer s.wg.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err := s.appSrv.Shutdown(shutdownCtx)
+		shutdownCancel()
+		if err != nil {
+			// Log the error only (could be context canceled)
+			slog.WarnContext(shutdownCtx,
+				"App server shutdown error",
+				slog.Any("error", err),
+			)
+		}
+	}()
+
+	// If we have a tlsCertWatchFn, invoke that
+	if s.tlsCertWatchFn != nil {
+		err = s.tlsCertWatchFn(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to watch for TLS certificates: %w", err)
+		}
+	}
+
+	// Block until the context is canceled or the app server exits unexpectedly.
+	select {
+	case <-ctx.Done():
+	case err = <-appSrvErrCh:
+		return fmt.Errorf("app server failed: %w", err)
+	}
+
+	// Servers are stopped with deferred calls
+	return nil
+}
+
+func (s *Server) startAppServer(ctx context.Context, appSrvErrCh chan<- error) error {
+	cfg := config.Get()
+
+	// Create the HTTP(S) server
+	addr := net.JoinHostPort(cfg.Server.Bind, strconv.Itoa(cfg.Server.Port))
+	s.appSrv = &http.Server{
+		Addr:              addr,
+		MaxHeaderBytes:    1 << 20, // 1MB
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       60 * time.Second,
+		Handler:           s.handler,
+	}
+
+	// Create the listener if we don't have one already
+	if s.appListener == nil {
+		var err error
+		// Configure TLS for the HTTP server (optional)
+		if s.tlsConfig != nil {
+			s.appSrv.TLSConfig = s.tlsConfig
+		}
+
+		s.appListener, err = net.Listen("tcp", s.appSrv.Addr) //nolint:noctx
+		if err != nil {
+			return fmt.Errorf("failed to create TCP listener: %w", err)
+		}
+
+		slog.InfoContext(ctx, "Starting app server",
+			slog.String("bind", cfg.Server.Bind),
+			slog.Int("port", cfg.Server.Port),
+			slog.Bool("tls", s.tlsConfig != nil),
+		)
+	}
+
+	// Start the HTTP(S) server in a background goroutine
+	go func() {
+		defer s.appListener.Close() //nolint:errcheck
+
+		// Next call blocks until the server is shut down
+		var srvErr error
+		if s.tlsConfig != nil {
+			srvErr = s.appSrv.ServeTLS(s.appListener, "", "")
+		} else {
+			srvErr = s.appSrv.Serve(s.appListener)
+		}
+		if !errors.Is(srvErr, http.ErrServerClosed) {
+			select {
+			case appSrvErrCh <- srvErr:
+			default:
+			}
+		}
+	}()
+
+	return nil
+}

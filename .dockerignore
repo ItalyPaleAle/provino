@@ -1,0 +1,13 @@
+# This is an allowlist: everything is excluded and the paths the Dockerfile reads are added back, so a new folder at the root never silently joins the build context
+*
+
+!go.mod
+!go.sum
+!api
+!cmd
+!imagekeys
+!imagesize
+!internal
+
+# Tests are not part of the binary
+**/*_test.go

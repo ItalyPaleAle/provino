@@ -1,0 +1,158 @@
+package imagekeys
+
+import (
+	"strings"
+	"testing"
+	"uuid"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var (
+	siteID    = uuid.MustParse("6ba7b810-9dad-41d1-80b4-00c04fd430c8")
+	namespace = siteID.String()
+	imageID   = uuid.MustParse("3480e342-5b8a-4ec8-9b0d-a0b26a751691")
+)
+
+func TestLayout(t *testing.T) {
+	l := New()
+
+	// The two folder levels come from the first four characters of the image ID
+	assert.Equal(t, namespace+"/34/80/", l.Prefix(namespace, imageID))
+	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_orig.png", l.OriginalKey(namespace, imageID, "PNG"))
+	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_1200x400.webp", l.AssetKey(namespace, imageID, 1200, 400, "webp"))
+	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_manifest.json", l.ManifestKey(namespace, imageID))
+
+	// Every object of one image sits under the prefix, so listing or deleting it reaches all of them
+	for _, key := range []string{
+		l.OriginalKey(namespace, imageID, "png"),
+		l.AssetKey(namespace, imageID, 1200, 400, "webp"),
+		l.ManifestKey(namespace, imageID),
+	} {
+		assert.True(t, strings.HasPrefix(key, l.Prefix(namespace, imageID)), key)
+	}
+}
+
+// The layout is one contract shared by both services and every backend, so nothing may reintroduce a per-store shape
+func TestLayoutDoesNotVaryByBackend(t *testing.T) {
+	site := uuid.MustParse("4c16dfe3-cefe-4057-8b29-55f08ecfe204")
+	image := uuid.MustParse("50cefe14-49d3-4b54-bca6-3dfde5f3c1b8")
+
+	assert.Equal(t,
+		"4c16dfe3-cefe-4057-8b29-55f08ecfe204/50/ce/50cefe14-49d3-4b54-bca6-3dfde5f3c1b8_1536x2048.avif",
+		New().AssetKey(site.String(), image, 1536, 2048, "avif"),
+	)
+	assert.Equal(t,
+		"4c16dfe3-cefe-4057-8b29-55f08ecfe204/50/ce/50cefe14-49d3-4b54-bca6-3dfde5f3c1b8_orig.jpg",
+		New().OriginalKey(site.String(), image, "jpg"),
+	)
+}
+
+// The folder levels are the leading characters of the image ID, which only spread evenly because those characters are random
+// A time-ordered identifier would put everything created in the same period in one folder, which is the thing sharding exists to avoid
+func TestShardFansOut(t *testing.T) {
+	const n = 2000
+
+	l := New()
+	buckets := make(map[string]int, n)
+	for range n {
+		buckets[l.Prefix(namespace, uuid.NewV4())]++
+	}
+
+	// With 256 possible folders, 2000 identifiers land nearly evenly rather than piling into one
+	assert.Greater(t, len(buckets), 200)
+
+	largest := 0
+	for _, count := range buckets {
+		if count > largest {
+			largest = count
+		}
+	}
+	assert.Less(t, largest, n/50)
+}
+
+func TestAssetKeyIgnoresQuality(t *testing.T) {
+	l := New()
+
+	// One variant per size and format: two encodings of the same variant are the same object, whatever quality produced them
+	assert.Equal(t,
+		l.AssetKey(namespace, imageID, 1200, 400, "webp"),
+		l.AssetKey(namespace, imageID, 1200, 400, "WEBP"),
+	)
+}
+
+func TestValidateID(t *testing.T) {
+	t.Run("accepts the identifiers both services mint", func(t *testing.T) {
+		// Every identifier that addresses an object is a v4 or v7
+		for _, id := range []uuid.UUID{uuid.NewV4(), uuid.New(), imageID, siteID, uuid.NewV7()} {
+			parsed, err := ValidateID(id.String())
+			require.NoError(t, err)
+			assert.Equal(t, id, parsed)
+		}
+	})
+
+	t.Run("rejects what cannot address an object", func(t *testing.T) {
+		tests := map[string]string{
+			"empty":          "",
+			"not a UUID":     "not-a-uuid",
+			"uppercase":      strings.ToUpper(imageID.String()),
+			"braced":         "{" + imageID.String() + "}",
+			"urn":            "urn:uuid:" + imageID.String(),
+			"no dashes":      strings.ReplaceAll(imageID.String(), "-", ""),
+			"path traversal": "../../etc/passwd",
+		}
+
+		for name, id := range tests {
+			t.Run(name, func(t *testing.T) {
+				_, err := ValidateID(id)
+				require.Error(t, err)
+			})
+		}
+	})
+
+	// The nil UUID parses and is canonical, but it has no version and names no image
+	t.Run("rejects the nil UUID", func(t *testing.T) {
+		_, err := ValidateID(uuid.Nil().String())
+		require.Error(t, err)
+	})
+}
+
+// A key must never escape the prefix it belongs to, whatever the identifiers are
+func TestKeysStayInsideTheirPrefix(t *testing.T) {
+	l := New()
+	for range 200 {
+		site, image := uuid.NewV4(), uuid.NewV4()
+		for _, key := range []string{
+			l.OriginalKey(site.String(), image, "png"),
+			l.AssetKey(site.String(), image, 100, 100, "webp"),
+			l.ManifestKey(site.String(), image),
+		} {
+			assert.NotContains(t, key, "..")
+			assert.False(t, strings.HasPrefix(key, "/"))
+			assert.True(t, strings.HasPrefix(key, site.String()+"/"))
+		}
+	}
+}
+
+// Keys written before namespaces replaced site IDs must not move, so these are pinned to the exact strings that layout produced
+func TestLayoutIsUnchangedForUUIDNamespaces(t *testing.T) {
+	l := New()
+	image := uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
+
+	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_orig.jpg", l.OriginalKey(namespace, image, ".jpg"))
+	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp", l.AssetKey(namespace, image, 600, 400, "webp"))
+	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_manifest.json", l.ManifestKey(namespace, image))
+}
+
+func TestValidateNamespace(t *testing.T) {
+	for _, valid := range []string{"a", "0", "default", "my-site", "tenant_42", "v1.photos", siteID.String(), strings.Repeat("a", 64)} {
+		err := ValidateNamespace(valid)
+		require.NoError(t, err, valid)
+	}
+
+	for _, invalid := range []string{"", "Default", "-leading", ".leading", "_leading", "with/slash", "with:colon", "with space", "a..b", "..", strings.Repeat("a", 65)} {
+		err := ValidateNamespace(invalid)
+		require.Error(t, err, invalid)
+	}
+}

@@ -1,0 +1,198 @@
+name: Build and publish
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+  # provino links against libvips through cgo, so the image compiles the binary inside the build rather than copying in one built on the runner
+  # That also makes it a container-only release: the binary is dynamically linked, so there are no standalone archives to publish alongside it
+  container:
+    name: Container image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A cgo build runs on the architecture it targets, so the arm64 image is compiled under emulation
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+          # Do not cache in release workflows
+          cache-image: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Do not cache in release workflows
+          cache-binary: false
+
+      # Lowercase REPO_OWNER which is required for containers
+      - name: Set lowercase REPO_OWNER
+        run: |
+          REPO_OWNER=${{ github.repository_owner }}
+          echo "REPO_OWNER=${REPO_OWNER,,}" >>${GITHUB_ENV}
+
+      - name: Generate container tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ env.REPO_OWNER }}/provino
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+
+      - name: Set variables
+        run: |
+          BUILD_ID=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+          BUILD_VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+          BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          COMMIT_HASH=$(echo "${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}" | head -c 7)
+
+          echo "BUILD_ID: '$BUILD_ID'"
+          echo "BUILD_VERSION: '$BUILD_VERSION'"
+          echo "BUILD_DATE: '$BUILD_DATE'"
+          echo "COMMIT_HASH: '$COMMIT_HASH'"
+
+          BUILDINFO_PKG="github.com/italypaleale/provino/internal/buildinfo"
+          BUILD_LDFLAGS="-X ${BUILDINFO_PKG}.Production=1 -X ${BUILDINFO_PKG}.AppVersion=${BUILD_VERSION} -X ${BUILDINFO_PKG}.BuildId=${BUILD_ID} -X ${BUILDINFO_PKG}.BuildDate=${BUILD_DATE} -X ${BUILDINFO_PKG}.CommitHash=${COMMIT_HASH} -buildid=${BUILD_ID}"
+
+          echo "BUILD_LDFLAGS=$BUILD_LDFLAGS" >> $GITHUB_ENV
+
+          echo "BUILD_LDFLAGS: '$BUILD_LDFLAGS'"
+
+      - name: Login to container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Container image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: docker-build-push
+        with:
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The arm64 leg compiles libvips-linked code under QEMU (slow)
+          platforms: linux/amd64
+          context: .
+          file: Dockerfile
+          build-args: |
+            BUILD_LDFLAGS=${{ env.BUILD_LDFLAGS }}
+          push: true
+
+      - name: Container image attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/provino'
+          subject-digest: ${{ steps.docker-build-push.outputs.digest }}
+          push-to-registry: true
+
+  helm-chart:
+    name: Publish Helm chart
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+
+    # The chart pulls the image tagged with its appVersion, so it is only published once that image exists
+    needs: container
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    env:
+      HELM_VERSION: "v4.3.0"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Lowercase REPO_OWNER which is required for containers
+      - name: Set lowercase REPO_OWNER
+        run: |
+          REPO_OWNER=${{ github.repository_owner }}
+          echo "REPO_OWNER=${REPO_OWNER,,}" >>${GITHUB_ENV}
+
+      - name: Install Helm
+        run: |
+          set -eo pipefail
+
+          HELM_TARBALL="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}.sha256sum"
+          sha256sum -c "${HELM_TARBALL}.sha256sum"
+
+          tar -xzf "${HELM_TARBALL}" linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf "${HELM_TARBALL}" "${HELM_TARBALL}.sha256sum" linux-amd64
+
+          helm version
+
+      - name: Set variables
+        run: |
+          # The chart is released alongside the service, so its version and appVersion both track the release tag
+          # The appVersion drops the tag's "v", which the chart adds back when it picks the image tag
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
+
+          # Helm must read Docker's default credentials so the attestation action can reuse the registry login
+          HELM_REGISTRY_CONFIG="${HOME}/.docker/config.json"
+
+          echo "CHART_VERSION=$CHART_VERSION" >> $GITHUB_ENV
+          echo "HELM_REGISTRY_CONFIG=$HELM_REGISTRY_CONFIG" >> $GITHUB_ENV
+
+          echo "CHART_VERSION: '$CHART_VERSION'"
+
+      - name: Lint and render the chart
+        run: |
+          make lint-chart
+
+      # Helm and the attestation action use the same Docker-format credential file
+      - name: Login to container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and push the chart
+        id: helm-push
+        run: |
+          set -eo pipefail
+
+          mkdir -p .charts
+          helm package helm \
+            --version "${CHART_VERSION}" \
+            --app-version "${CHART_VERSION}" \
+            --destination .charts
+
+          # The chart goes under a "charts" path so its repository does not collide with the container image at ghcr.io/${REPO_OWNER}/provino
+          helm push ".charts/provino-${CHART_VERSION}.tgz" "oci://ghcr.io/${REPO_OWNER}/charts" 2>&1 | tee helm-push.log
+
+          CHART_DIGEST=$(grep -oE 'sha256:[0-9a-f]{64}' helm-push.log | head -n 1)
+          if [[ -z "$CHART_DIGEST" ]]; then
+            echo "Failed to determine the digest of the pushed chart"
+            exit 1
+          fi
+
+          echo "digest=$CHART_DIGEST" >> $GITHUB_OUTPUT
+
+          echo "CHART_DIGEST: '$CHART_DIGEST'"
+
+      - name: Helm chart attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        with:
+          subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/charts/provino'
+          subject-digest: ${{ steps.helm-push.outputs.digest }}
+          push-to-registry: true

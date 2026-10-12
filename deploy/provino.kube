@@ -1,0 +1,30 @@
+# Podman Quadlet unit that runs provino from the pod definition next to it
+#
+# It is meant to be installed as a user unit, in ~/.config/containers/systemd, so both the podman that runs it and the process inside the pod are unprivileged
+# Installing it in /etc/containers/systemd instead makes it a system unit, which still runs the pod as a non-root user but gives podman itself root: change WantedBy to multi-user.target if you do
+
+[Unit]
+Description=provino, which stores uploaded images and generates their variants
+Documentation=https://github.com/italypaleale/provino/tree/main/deploy
+# The image is pulled on the first start, so the unit waits for a network that can reach the registry
+After=network-online.target
+Wants=network-online.target
+
+[Kube]
+Yaml=provino.yaml
+
+# The manifest declares the container port, and publishing it is a property of this host rather than of the pod
+# Rootless podman can bind this port without any capability, because it is above 1024
+PublishPort=3000:3000
+
+# `podman auto-update` replaces the pod when a newer image is pushed to the tag it was started from
+AutoUpdate=registry
+
+[Service]
+Restart=always
+# The first start pulls the image and migrates the actor database, which takes longer than systemd's default
+TimeoutStartSec=900
+
+[Install]
+# `default.target` because this is a user unit
+WantedBy=default.target

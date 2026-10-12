@@ -1,0 +1,261 @@
+# Number of provino replicas
+# More than one needs state the replicas can share, which the chart checks for when it renders the configuration:
+# - config.actors.database pointing at Postgres, and config.actors.runtimePSK, unless config.actors.runtime is "external"
+# - object storage for config.storage, or persistence.existingClaim pointing at a ReadWriteMany volume
+replicaCount: 1
+
+image:
+  repository: ghcr.io/italypaleale/provino
+  # Image tag, which defaults to "v" followed by the chart's appVersion when empty
+  tag: ""
+  # Pin the image by digest ("sha256:…"), which takes precedence over the tag
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Overrides for the generated resource names
+nameOverride: ""
+fullnameOverride: ""
+
+# Extra labels and annotations added to every resource created by this chart
+commonLabels: {}
+commonAnnotations: {}
+
+# provino's configuration, rendered into the config.yaml the chart mounts at /etc/provino
+# It takes every option in config.md in the repository, except for the ones the chart sets itself:
+# - server.bind and server.port, from ports.http
+# - actors.address, actors.bindAddress, and actors.bindPort, from the pod's IP and ports.peers
+# Options left unset keep provino's defaults, which store everything in the data volume (see persistence): the originals and the variants, and the SQLite database of the embedded actor runtime
+# The file is rendered into a Secret, since it usually holds credentials: pass these values in a file that is kept out of source control, or use existingConfigSecret instead
+# At least one way for callers to authenticate is required
+config: {}
+  # server:
+  #   publicUrl: https://images.example.com
+  #   corsAllowedOrigins:
+  #     - https://app.example.com
+  # auth:
+  #   jwt:
+  #     issuer: https://tenant.example.com/
+  #   apiKeys:
+  #     - id: backend
+  #       sha256: "<the hex-encoded SHA-256 of the key>"
+  #       scopes: [server]
+  # authorizer:
+  #   type: http
+  #   http:
+  #     url: https://app.example.com/api/provino/authorize
+  #     auth:
+  #       type: hmac
+  #       hmac:
+  #         secrets: ["whsec_…"]
+  # notify:
+  #   endpoints:
+  #     app:
+  #       url: https://app.example.com/hooks/provino
+  #       auth:
+  #         type: hmac
+  #         hmac:
+  #           secrets: ["whsec_…"]
+
+# Mount a Secret holding a complete config.yaml instead of having the chart render one from config
+# The chart still sets the actor address through the PROVINO_ACTORS_ADDRESS env var, but everything else comes from that file
+# It must leave server.bind unset or "0.0.0.0", and set server.port to ports.http if that is not 3000
+# The chart can't look inside the Secret, so none of the checks it makes on config apply
+existingConfigSecret: ""
+existingConfigSecretKey: config.yaml
+
+ports:
+  # Port the API server listens on
+  http: 3000
+  # Port the actor hosts reach each other on, which is UDP because Francis speaks WebTransport over HTTP/3
+  # Only other replicas of this release connect to it
+  peers: 7571
+
+# Volume mounted at /var/lib/provino/data, which is where provino's defaults keep the originals, the variants, and the SQLite database of the embedded actor runtime
+# With object storage and Postgres configured nothing is written to it, so it can be disabled, which more than one replica requires unless existingClaim is a ReadWriteMany volume they share
+persistence:
+  # Disabling this mounts an emptyDir instead, which loses everything stored in it when the pod restarts
+  enabled: true
+  # Mount an existing PersistentVolumeClaim instead of the volume claim template created by the chart
+  existingClaim: ""
+  # Empty uses the cluster's default StorageClass, while "-" disables dynamic provisioning
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+# Writable /tmp, since the root file system is read-only
+# It holds the source image each running job caches, because storage.sourceCache defaults to a folder in it, and the files uploads are spooled to on their way to object storage
+# Everything in it can be downloaded again, so it is an emptyDir rather than part of the data volume
+tmp:
+  # Leave room for several concurrent jobs and uploads of images.maxUploadSize
+  sizeLimit: 2Gi
+  # "Memory" makes it a tmpfs, whose contents count against the container's memory limit
+  medium: ""
+
+service:
+  type: ClusterIP
+  # Port the Service exposes the API on
+  port: 3000
+  # Only used when type is NodePort or LoadBalancer
+  nodePort: null
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: ""
+  annotations: {}
+
+  # Headless Service that governs the StatefulSet and gives every replica a stable per-pod DNS name
+  headless:
+    annotations: {}
+
+# Ingress in front of the API, which is what browsers upload through
+# A reverse proxy in front of provino should be listed in config.server.trustedProxies, or rate limiting sees every upload as coming from the proxy
+# The ingress controller's own limit on request bodies has to allow for images.maxUploadSize, which is 32 MiB by default
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: images.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: provino-tls
+  #    hosts:
+  #      - images.example.com
+
+# Gateway API HTTPRoute in front of the API, as an alternative to the Ingress above
+httpRoute:
+  enabled: false
+  annotations: {}
+  # Gateways the route attaches to
+  parentRefs: []
+  #  - name: gateway
+  #    namespace: gateway-system
+  #    sectionName: https
+  hostnames: []
+  #  - images.example.com
+
+serviceAccount:
+  create: true
+  # Uses the generated name when empty
+  name: ""
+  annotations: {}
+  # provino doesn't talk to the Kubernetes API, so no token is mounted unless asked for
+  automountServiceAccountToken: false
+
+# Service account tokens projected into the pods, each as a file named "token" in its mountPath
+# They are what the options that read a token from a file are pointed at:
+# - actors.external.bootstrapTokenFile, to join a Francis runtime whose hosts bootstrap with JWTs
+# - an oauth2 clientAssertion of "KubernetesServiceAccountToken=<mountPath>/token", for identity providers that accept federated credentials
+projectedServiceAccountTokens: []
+  # - name: francis
+  #   audience: francis-runtime
+  #   mountPath: /var/run/secrets/francis
+  #   expirationSeconds: 3600
+
+podDisruptionBudget:
+  # Only created when replicaCount is greater than 1
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: null
+
+# Pods are spread across nodes on a best-effort basis so a single node failure does not take out every replica
+# Set to "hard" to require distinct nodes, or "" to disable
+podAntiAffinity: soft
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The published image runs as UID/GID 65532
+  runAsUser: 65532
+  runAsGroup: 65532
+  # Makes the data volume writable by that user
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Encoding is what consumes the memory, and config.images.maxConcurrentEncodes is what bounds how much of it happens at once
+# When that is unset it follows the CPU limit, so setting one also bounds the memory a burst of jobs takes
+resources: {}
+  # limits:
+  #   cpu: "2"
+  #   memory: 2Gi
+  # requests:
+  #   cpu: 250m
+  #   memory: 256Mi
+
+# Every probe requests /healthz on the API port
+# The startup probe is what gives the first start room to migrate the actor database before the liveness probe starts counting failures
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 0
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 3
+  timeoutSeconds: 5
+  failureThreshold: 40
+
+# Room for the running workflow steps to wind down and hand their work to another host
+terminationGracePeriodSeconds: 60
+
+updateStrategy:
+  type: RollingUpdate
+
+# "Parallel" starts and stops replicas together, which is safe because they coordinate through the actor runtime
+podManagementPolicy: Parallel
+
+nodeSelector: {}
+tolerations: []
+# Takes precedence over podAntiAffinity when set
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+# OpenTelemetry export, which is off until an exporter is configured
+# Anything not covered here can be set through extraEnv, since provino reads the standard OTEL_* variables
+openTelemetry:
+  enabled: false
+  # Endpoint of the OTLP collector, for example "http://otel-collector.observability.svc.cluster.local:4318"
+  endpoint: ""
+  # Either "http/protobuf" or "grpc"
+  protocol: http/protobuf
+  # Per-signal exporters, each either "otlp", "console", or "none"
+  traces: otlp
+  metrics: otlp
+  logs: otlp
+  # Head sampler, for example "parentbased_traceidratio" with samplerArg "0.1"
+  sampler: ""
+  samplerArg: ""
+
+# Additional environment variables and volumes for the provino container
+# extraEnvFrom is how a Secret reaches a storage DSN that names an environment variable, such as the tokenEnv of a Vercel Blob store
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

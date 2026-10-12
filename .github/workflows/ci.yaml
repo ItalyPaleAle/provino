@@ -1,0 +1,95 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+      - v*
+  pull_request:
+
+jobs:
+
+  test:
+    name: Go
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: "1"
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install libvips
+        # libheif-plugin-aomenc is the AV1 encoder libvips uses to write AVIF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvips-dev libheif-plugin-aomenc
+
+      - name: Check Go dependency minimum age
+        run: |
+          go tool gomod-age
+
+      - name: Check config diff
+        run: |
+          echo "If this fails, please run 'make gen-config' to fix"
+          make check-config-diff
+
+      - name: Check openapi diff
+        run: |
+          echo "If this fails, please run 'make gen-openapi' to fix"
+          make check-openapi-diff
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version-file: .golangci-lint-version
+
+      - name: Test
+        run: |
+          make test-race
+
+      - name: Test workflows
+        # The durable workflow tests skip themselves under the race detector, so the step above doesn't cover them
+        run: |
+          make test-workflows
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      HELM_VERSION: "v4.3.0"
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runner image ships a Helm of its own, but its version changes under the workflow, so a pinned one is installed and verified
+      - name: Install Helm
+        run: |
+          set -eo pipefail
+
+          HELM_TARBALL="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}.sha256sum"
+          sha256sum -c "${HELM_TARBALL}.sha256sum"
+
+          tar -xzf "${HELM_TARBALL}" linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf "${HELM_TARBALL}" "${HELM_TARBALL}.sha256sum" linux-amd64
+
+          helm version
+
+      - name: Lint and render the chart
+        run: |
+          make lint-chart

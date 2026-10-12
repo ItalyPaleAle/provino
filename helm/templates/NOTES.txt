@@ -1,0 +1,55 @@
+provino {{ include "provino.imageTag" . }} was installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Replicas: {{ int .Values.replicaCount }}
+{{- if not .Values.existingConfigSecret }}
+Actor runtime: {{ include "provino.config.actorsRuntime" . }}{{ if eq (include "provino.config.actorsRuntime" .) "embedded" }}, persisting to {{ if include "provino.config.usesPostgres" . }}Postgres{{ else }}SQLite{{ end }}{{ end }}
+{{- if and (not .Values.persistence.enabled) (include "provino.config.usesDataVolume" .) }}
+
+  WARNING: persistence is disabled, but the configuration still keeps data in the data volume
+  (the originals, the variants, or the actor database), which is an emptyDir lost whenever the
+  pod restarts. Only do this for testing.
+{{- end }}
+{{- if dig "auth" "none" "enabled" false (default (dict) .Values.config) }}
+
+  WARNING: config.auth.none is enabled, so every request is accepted without credentials.
+  Only do this for development.
+{{- end }}
+{{- end }}
+
+1. Reach the API.
+
+   Inside the cluster it's at:
+
+     {{ if include "provino.config.usesTLS" . }}https{{ else }}http{{ end }}://{{ include "provino.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ int .Values.service.port }}
+{{- if .Values.ingress.enabled }}
+
+   Through the Ingress:
+{{ range .Values.ingress.hosts }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if .Values.httpRoute.enabled }}
+
+   Through the HTTPRoute:
+{{ range .Values.httpRoute.hostnames }}
+     https://{{ . }}
+{{- end }}
+{{- end }}
+
+   From your machine:
+
+     kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "provino.fullname" . }} {{ int .Values.service.port }}:{{ int .Values.service.port }}
+     curl -i http://127.0.0.1:{{ int .Values.service.port }}/healthz
+
+   The OpenAPI document is served at /.openapi.
+
+2. Verify the install:
+
+     helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if and (eq (int .Values.replicaCount) 1) (not .Values.existingConfigSecret) (eq (include "provino.config.actorsRuntime" .) "embedded") (not (include "provino.config.usesPostgres" .)) }}
+
+To run more than one replica, the replicas need state they can share: set config.actors.database
+to Postgres, set config.actors.runtimePSK, point config.storage at an S3 or Vercel Blob store,
+and set persistence.enabled=false.
+{{- end }}
+
+Documentation: https://github.com/italypaleale/provino/tree/main/docs

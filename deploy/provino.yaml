@@ -1,0 +1,157 @@
+# Pod definition for the provino service, played by the Quadlet unit next to this file
+#
+# It is written for a rootless Podman: every process in the pod runs as the unprivileged user the image was built for, the root file system is read-only, and no capability is kept
+# The same manifest is a valid Kubernetes pod, but Podman is what it is written against: the probes run `curl` because that is what `podman kube play` turns into a container health check most predictably
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: provino-config
+stringData:
+  # The service looks for `config.yaml` in `/etc/provino`, which is where this is mounted
+  # Every path here is absolute, because the working directory is not writable and the defaults are relative to it
+  config.yaml: |
+    server:
+      bind: "0.0.0.0"
+      port: 3000
+      publicUrl: https://images.example.com
+      # The pages browsers upload from
+      corsAllowedOrigins:
+        - https://app.example.com
+    # Replace every example value before starting the service
+    auth:
+      # Browsers present a JWT from your identity provider
+      jwt:
+        issuer: https://tenant.example.com/
+      # Backends present an API key; this is the SHA-256 of the key, generated as described in docs/deploying.md
+      apiKeys:
+        - id: backend
+          sha256: replace-with-the-sha256-of-the-api-key
+          scopes: [server]
+    # Asked about every browser upload, see docs/authorizer.md
+    authorizer:
+      type: http
+      http:
+        url: https://app.example.com/api/provino/authorize
+        auth:
+          type: hmac
+          hmac:
+            secrets: [replace-with-a-whsec-secret]
+    # Where jobs report their outcome, see docs/webhooks.md
+    notify:
+      endpoints:
+        app:
+          url: https://app.example.com/hooks/provino
+          auth:
+            type: hmac
+            hmac:
+              secrets: [replace-with-a-whsec-secret]
+    actors:
+      database: sqlite:///var/lib/provino/data/actors.db
+    storage:
+      originals: /var/lib/provino/data/originals
+      variants: /var/lib/provino/data/variants
+    logs:
+      json: true
+---
+# Podman backs this with a named volume, which is what keeps the originals, the variants and the actor database across restarts
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: provino-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: provino
+  labels:
+    app: provino
+spec:
+  # The image already runs as this user, and declaring it here is what lets `runAsNonRoot` be checked rather than assumed
+  # In a rootless Podman these are mapped through the user's subuid and subgid ranges, so 65532 has to fit inside them, which it does for the usual 65536-entry range
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  restartPolicy: Always
+  containers:
+    - name: provino
+      image: ghcr.io/italypaleale/provino:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        # Nothing writes outside the two volumes below, so the rest of the file system can stay read-only
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      ports:
+        # The host port is published by the Quadlet unit rather than declared here, so this manifest stays usable on a real cluster
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+      volumeMounts:
+        - name: config
+          mountPath: /etc/provino
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/provino/data
+        # The root file system is read-only, and two things need somewhere to write: an object store reached over HTTP spools each upload to a temporary file before sending it, and every job caches the source image its variants are encoded from
+        - name: tmp
+          mountPath: /tmp
+      # Both probes call the health endpoint with the `curl` the image carries for its own HEALTHCHECK
+      # The startup probe is what gives the first run room to migrate the actor database before the liveness probe starts counting failures
+      startupProbe:
+        exec:
+          command:
+            - /usr/bin/curl
+            - --fail
+            - --silent
+            - --max-time
+            - "3"
+            - http://127.0.0.1:3000/healthz
+        periodSeconds: 2
+        failureThreshold: 30
+      livenessProbe:
+        exec:
+          command:
+            - /usr/bin/curl
+            - --fail
+            - --silent
+            - --max-time
+            - "3"
+            - http://127.0.0.1:3000/healthz
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+      # Encoding is what consumes the memory here, and `images.maxConcurrentEncodes` is what bounds how much of it happens at once
+      # These are a starting point for one small instance rather than a measured figure
+      resources:
+        requests:
+          cpu: 250m
+          memory: 256Mi
+        limits:
+          memory: 1Gi
+  volumes:
+    - name: config
+      secret:
+        name: provino-config
+    - name: data
+      persistentVolumeClaim:
+        claimName: provino-data
+    # Backed by disk rather than by memory, so a burst of uploads doesn't come out of the container's memory limit
+    # It holds the source image each running job caches under `storage.sourceCache`, which defaults here, and the spool files of a storage backend reached over HTTP: with the file system backend configured above there are none of the latter, because that one writes its temporary file next to the object it is writing
+    # Everything in here can be downloaded again, which is why it is an emptyDir rather than part of the data volume: losing it costs one download per job that was running
+    # The size covers several concurrent jobs and uploads of `images.maxUploadSize`, which is what bounds one cached source and one spool file
+    # Podman treats the limit as advisory, since it backs this with a volume rather than with a sized file system
+    - name: tmp
+      emptyDir:
+        sizeLimit: 1Gi

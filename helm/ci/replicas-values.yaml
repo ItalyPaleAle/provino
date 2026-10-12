@@ -1,0 +1,39 @@
+# Several replicas sharing Postgres and object storage, reached through an Ingress
+replicaCount: 3
+persistence:
+  enabled: false
+config:
+  server:
+    publicUrl: https://images.example.com
+    corsAllowedOrigins: [https://app.example.com]
+    trustedProxies: [10.0.0.0/8]
+  auth:
+    jwt:
+      issuer: https://tenant.example.com/
+  authorizer:
+    type: static
+    static:
+      namespace: uploads
+      variants:
+        - format: webp
+          quality: 80
+          size: {width: 1200, height: 1200}
+  actors:
+    database: postgres://provino:password@postgres:5432/provino
+    runtimePSK: lint
+  storage:
+    originals: s3://key:secret@s3.eu-west-1.amazonaws.com/provino-originals
+    variants: s3://key:secret@s3.eu-west-1.amazonaws.com/provino-variants
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: images.example.com
+      paths:
+        - path: /
+  tls:
+    - secretName: provino-tls
+      hosts: [images.example.com]
+openTelemetry:
+  enabled: true
+  endpoint: http://otel-collector:4318

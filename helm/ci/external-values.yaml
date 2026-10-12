@@ -1,0 +1,42 @@
+# Two replicas that are actor hosts of a standalone Francis runtime, joining it with a projected service account token
+replicaCount: 2
+persistence:
+  enabled: false
+config:
+  auth:
+    apiKeys:
+      - id: backend
+        key: pvk_0123456789abcdefghijklmnopqrstuv
+        scopes: [server]
+  actors:
+    runtime: external
+    external:
+      addresses:
+        - francis-0.francis-headless.francis.svc.cluster.local:7400
+        - francis-1.francis-headless.francis.svc.cluster.local:7400
+      bootstrapTokenFile: /var/run/secrets/francis/token
+      caPath: /etc/francis-ca/ca.pem
+  storage:
+    originals: vercelblob:?tokenEnv=BLOB_READ_WRITE_TOKEN&access=private&prefix=originals/
+    variants: vercelblob:?tokenEnv=BLOB_READ_WRITE_TOKEN&access=public&prefix=variants/
+projectedServiceAccountTokens:
+  - name: francis
+    audience: francis-runtime
+    mountPath: /var/run/secrets/francis
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: gateway
+      namespace: gateway-system
+  hostnames: [images.example.com]
+extraEnvFrom:
+  - secretRef:
+      name: provino-blob
+extraVolumes:
+  - name: francis-ca
+    configMap:
+      name: francis-ca
+extraVolumeMounts:
+  - name: francis-ca
+    mountPath: /etc/francis-ca
+    readOnly: true

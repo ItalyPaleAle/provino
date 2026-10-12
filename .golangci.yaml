@@ -1,0 +1,51 @@
+version: "2"
+
+linters:
+  default: all
+
+  enable: []
+
+  disable:
+    - cyclop
+    - depguard
+    - dupl
+    - exhaustive
+    - exhaustruct
+    - exhaustruct_v5
+    - err113
+    - funcorder
+    - funlen
+    - gochecknoglobals
+    - gochecknoinits
+    - gocognit
+    - goconst
+    - gocyclo
+    - godot
+    - gomodguard
+    - ireturn
+    - lll
+    - maintidx
+    - mnd
+    - nestif
+    - nlreturn
+    - nolintlint
+    - nonamedreturns
+    - paralleltest
+    - perfsprint
+    - revive
+    - tagalign
+    - testpackage
+    - varnamelen
+    - wsl
+    - wsl_v5
+
+formatters:
+  enable: []
+
+run:
+  timeout: 5m
+  relative-path-mode: cfg
+  issues-exit-code: 1
+  tests: true
+  build-tags:
+    - unit

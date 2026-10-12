@@ -1,0 +1,53 @@
+# provino's configuration for the Compose file next to this one, which mounts it read-only at /etc/provino/config.yaml
+# Every option is documented in config.md at the root of the repository
+#
+# The file is bind-mounted, so it has to be readable by the uid 65532 the image runs as, see README.md
+# Every path here is absolute, and inside the provino-data volume, which Compose mounts at /var/lib/provino
+
+server:
+  # provino's public origin, which is also the default audience of the JWTs it accepts
+  publicUrl: http://localhost:3000
+  # The pages browsers upload from, once an authorizer is configured below
+  #corsAllowedOrigins:
+  #  - https://app.example.com
+  # The reverse proxy in front of provino, if there is one, so rate limiting can tell its clients apart
+  #trustedProxies:
+  #  - 172.16.0.0/12
+
+auth:
+  # Backends present an API key; this is the SHA-256 of the key, generated as described in docs/deploying.md
+  apiKeys:
+    - id: backend
+      sha256: replace-with-the-sha256-of-the-api-key
+      scopes: [server]
+  # Browsers present a JWT from your identity provider
+  #jwt:
+  #  issuer: https://tenant.example.com/
+
+# Asked about every browser upload, see docs/authorizer.md
+# Browser uploads are disabled until one is configured
+#authorizer:
+#  type: http
+#  http:
+#    url: https://app.example.com/api/provino/authorize
+#    auth:
+#      type: hmac
+#      hmac:
+#        secrets: [replace-with-a-whsec-secret]
+
+# Where jobs report their outcome, see docs/webhooks.md
+#notify:
+#  endpoints:
+#    app:
+#      url: https://app.example.com/hooks/provino
+#      auth:
+#        type: hmac
+#        hmac:
+#          secrets: [replace-with-a-whsec-secret]
+
+actors:
+  database: sqlite:///var/lib/provino/data/actors.db
+
+storage:
+  originals: /var/lib/provino/data/originals
+  variants: /var/lib/provino/data/variants

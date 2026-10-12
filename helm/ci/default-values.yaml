@@ -1,0 +1,9 @@
+# A single replica that keeps everything in its data volume, which is the smallest useful install
+config:
+  server:
+    publicUrl: https://images.example.com
+  auth:
+    apiKeys:
+      - id: backend
+        sha256: 0b8e6d2f0c6b4a1f7f1c2b0d0d1e8b8f6a6c9d2e5f4a3b2c1d0e9f8a7b6c5d4e
+        scopes: [server]
