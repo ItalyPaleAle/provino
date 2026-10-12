@@ -6,7 +6,7 @@ tool github.com/fchimpan/gomod-age
 
 require (
 	github.com/davidbyttow/govips/v2 v2.19.0
-	github.com/italypaleale/francis v0.1.0
+	github.com/italypaleale/francis v0.2.0-rc.1
 	github.com/italypaleale/go-kit v1.3.0
 	github.com/jinzhu/copier v0.4.0
 	github.com/jwx-go/jwkfetch/v4 v4.0.4
@@ -81,7 +81,7 @@ require (
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.62.0 // indirect
+	github.com/quic-go/quic-go v0.63.0 // indirect
 	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
