@@ -1,13 +1,16 @@
 # provino
 
-provino is an HTTP service that stores the images your users upload and turns each one into the set of variants your application needs: the formats, sizes and crops you ask for, encoded with libvips.
+provino is a high-performance HTTP service that stores the images your users upload and turns each one into the set of variants your application needs: the formats, sizes and crops you ask for.
 
-- **Browsers upload directly.** An upload goes straight from the browser to provino, and an *authorizer* you control (an HTTP endpoint you run, or a static block in the configuration) decides its namespace, how large it may be, and which variants to generate.
+- **Browsers upload directly.** An upload goes straight from the browser to provino, and an *authorizer* you control (an HTTP endpoint you run, or a static block in the config) decides its namespace, how large it may be, and which variants to generate.
 - **Backends upload and re-render.** A trusted backend can upload images and ask for new variants of existing ones through the client API.
-- **Durable jobs.** Every upload and every request for variants is a job, run by a durable workflow built on the [Francis](https://gofrancis.dev) actor framework. A job survives a restart of the service, and a job that fails is undone: the image is left as it was found.
-- **One job per image at a time.** The jobs of an image wait in a queue, so two jobs never race to describe the same image.
+- **One or more replicas.** provino is built on top of the [Francis](https://gofrancis.dev) actor framework, which allows running a single instance or scaling horizontally to many replicas, to handle more concurrent requests.
+- **Durable workflows.** Every upload and every request for variants is run by a durable workflow built on Francis. Workflows survive a restart of the service and gracefully handle failures and compensations.
 - **Signed webhooks.** A job reports its outcome to the endpoints named in the configuration, signed following the [Standard Webhooks](https://www.standardwebhooks.com) specification (HMAC or Ed25519), or authenticated with an OAuth2 client-credentials token.
-- **Your storage.** Originals and variants live in the object store you choose (the local file system, S3 or an S3-compatible store, or Vercel Blob), next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, usually through a CDN.
+- **Your storage.** Originals and variants live in the object store you choose next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, usually through a CDN. Supported storages:
+   - Local file system
+   - AWS S3 or S3-compatbile endpoints
+   - Vercel Blob
 
 provino never makes a variant larger than its source, reuses the variants that are already stored when a set changes, and detects every upload's format from its content rather than its name.
 
@@ -34,14 +37,14 @@ sequenceDiagram
 
 A backend does the same through `POST /v1/client/upload`, without the authorizer, and asks for new variants of an existing image with `POST /v1/client/optimize`.
 
-Every image belongs to a **namespace**, a short name that is the first segment of every object key: a tenant, a site, or `default`. The objects of an image are stored under `<namespace>/<id[0:2]>/<id[2:4]>/`, which spreads a namespace's images across 65,536 folders instead of piling them into one.
+Every image belongs to a namespace, a short name that is the first segment of every object key: a tenant, a site, or `default`. The objects of an image are stored under `<namespace>/<id[0:2]>/<id[2:4]>/`, which spreads a namespace's images across 65,536 folders instead of piling them into one.
 
 ## Quick start
 
-provino needs libvips through cgo to build:
+provino needs libvips to build:
 
 ```sh
-# Debian/Ubuntu; libheif-plugin-aomenc is what makes AVIF output work
+# Debian/Ubuntu
 sudo apt-get install libvips-dev libheif-plugin-aomenc
 # macOS
 brew install vips
