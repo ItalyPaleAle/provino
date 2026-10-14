@@ -120,7 +120,6 @@ Callers authenticate with a JWT from an OpenID Connect provider, with an API key
   - [Docker Compose and Podman](deploy/README.md): a single instance on one host
   - [Helm chart](helm/README.md): Kubernetes, with one replica or several
 - [Configuration reference](config.md), and an annotated [sample](config.sample.yaml)
-- [Jobs](internal/actors/README.md): how the queue and the workflow work, for contributors
 
 ## Go packages
 
@@ -134,18 +133,6 @@ Applications written in Go can use these packages, which don't need cgo:
 | [`variant`](variant) | The variant spec, formats and fits |
 | [`imagekeys`](imagekeys) | The object key layout |
 | [`imagesize`](imagesize) | Which boxes a source can fill without being enlarged |
-
-## Development
-
-```sh
-make test            # unit tests, with the "unit" build tag
-make test-workflows  # the durable workflow tests, which skip themselves under the race detector
-make lint            # golangci-lint, at the version in .golangci-lint-version
-make gen-config      # regenerate config.md and config.sample.yaml after changing the config struct
-make gen-openapi     # regenerate the OpenAPI document after changing the API
-```
-
-See [AGENTS.md](AGENTS.md) for the coding conventions.
 
 ## License
 

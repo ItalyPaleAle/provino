@@ -1,6 +1,6 @@
 # Jobs: the image queue and the job workflow
 
-Everything provino does after accepting a request runs as a job: every upload (from a browser or a backend) and every optimize request becomes one, with or without variants. A job waits in its image's queue, and when its turn comes it runs as a built-in [Francis workflow](https://gofrancis.dev/workflows/).
+Everything provino does after accepting a request runs as a job: every upload (from a browser or a backend) and every optimize request becomes one, with or without variants. A job waits in its image's queue, and when its turn comes it runs as a [Francis workflow](https://gofrancis.dev/workflows/).
 
 Francis owns the actors, the workflow journal, retries, deadlines, retention and purging. provino declares the queue actor and the workflow graph, and supplies idempotent handlers for the work itself.
 
@@ -15,7 +15,7 @@ Its state is the active job, the jobs waiting behind it (each with its full `Job
 - **`job`**, a read-only peek, reports whether a job is active, queued (with its position) or recently finished, along with the hash of the subject that started it.
 - **The `check` alarm** is the safety net. It fires after the active job's deadline, after a failed start, and when the oldest history entry expires.
 
-The actor records a job as active **before** starting its workflow. If the process dies in between, the actor is left holding an active job whose workflow doesn't exist, and `heal` frees it: every `enqueue` and every alarm reads the active job's journal, and moves on when the workflow has ended or doesn't exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
+The actor records a job as active before starting its workflow. If the process dies in between, the actor is left holding an active job whose workflow doesn't exist, and `heal` frees it: every `enqueue` and every alarm reads the active job's journal, and moves on when the workflow has ended or doesn't exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
 
 The actor holds the queue itself, rather than starting every job as a workflow parked on a `WaitForEvent` step, for two reasons. Francis counts a workflow's waiting time against its deadline. And `RaiseEvent` records nothing when it arrives before the wait step is open, while its idempotency key makes raising it again unreliable, so a "your turn" event could be lost.
 

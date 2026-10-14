@@ -1,8 +1,6 @@
 # The authorizer
 
-A browser upload to `POST /v1/public/ingest` is decided by an **authorizer**. Before a byte of the image is stored, provino asks it who is uploading and what that caller may do: which namespace the image goes into, how large it may be, which formats it may be in, which variants to generate, and where to report the outcome.
-
-Deciding at the moment of the upload, instead of reading a decision out of the caller's token, is what keeps it current: a revoked permission or a changed variant policy applies to the next upload.
+A browser upload to `POST /v1/public/ingest` is decided by an authorizer. Before the image is stored, provino asks it who is uploading and what that caller may do: which namespace the image goes into, how large it may be, which formats it may be in, which variants to generate, and where to report the outcome.
 
 Browser uploads are disabled when no authorizer is configured. The client API (`/v1/client/*`) never consults it, because a caller with the `server` scope is trusted with every namespace.
 
@@ -15,7 +13,7 @@ authorizer:
   type: static
   static:
     namespace: default
-    # Applied together with images.maxUploadSize; 0 leaves only that limit
+    # Applied together with images.maxUploadSize, 0 leaves only that limit
     maxBytes: 20971520
     # Empty allows every supported format
     allowedFormats: [jpg, png, heic]
@@ -72,7 +70,7 @@ provino posts:
 | --- | --- |
 | `version` | Version of the contract, always `provino/v1` |
 | `subject` | The subject of the caller's token, which is who your application authorizes |
-| `context` | The browser's context, at most 4 KiB, never interpreted by provino |
+| `context` | The browser's context, at most 4 KB, never interpreted by provino |
 | `file` | What the browser said about the file. Neither value is trusted: provino detects the format from the file's content |
 
 ### Response
@@ -95,7 +93,7 @@ Answer `200` with the decision:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `namespace` | yes | Namespace the image is stored in: 1 to 64 lowercase letters, digits, dots, underscores or dashes, starting with a letter or digit |
-| `imageId` | no | ID of the image, a canonical UUID that isn't in use yet: a v4, or a v7 for an image that already has one. If omitted, provino mints a v4 |
+| `imageId` | no | ID of the image, a canonical UUID that isn't in use yet. If omitted, provino mints a new UUID v4 |
 | `maxBytes` | no | Size limit for this upload, applied together with `images.maxUploadSize` |
 | `allowedFormats` | no | Source formats the upload may be in. Formats provino doesn't support are ignored, and if none is left the answer is invalid. If omitted, every supported format is allowed |
 | `variants` | no | Variants to generate once the original is stored. If omitted, the job only records the image |
@@ -105,10 +103,10 @@ Answer `403` or `404` to refuse the upload, and the browser gets a `403 upload_r
 
 Any other answer is treated as a failure of the authorizer, and the browser gets a `502 authorizer_failed`. That includes:
 
-- any other status, or a redirect;
-- no answer within the timeout;
-- an answer larger than 256 KiB;
-- invalid JSON, or a decision that fails validation, such as an invalid namespace, a UUID that is neither v4 nor v7, an invalid variant, or an unknown notification endpoint.
+- any other status, or a redirect
+- no answer within the timeout
+- an answer larger than 256 KB
+- invalid JSON, or a decision that fails validation, such as an invalid namespace, a UUID that is not v4, an invalid variant, or an unknown notification endpoint
 
 ### Example in Go
 
