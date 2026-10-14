@@ -53,6 +53,6 @@ type EventData struct {
 type Notify struct {
 	// Name of the endpoint in provino's configuration, or empty for the default endpoint
 	Endpoint string `json:"endpoint,omitempty"`
-	// Opaque JSON object that is echoed back in the event, at most 4 KiB
+	// Opaque JSON object that is echoed back in the event, at most 4 KB
 	Context json.RawMessage `json:"context,omitempty"`
 }

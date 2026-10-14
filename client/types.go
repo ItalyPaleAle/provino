@@ -10,7 +10,7 @@ import (
 
 // IngestMetadata is the `metadata` part of a browser upload to `POST /v1/public/ingest`
 type IngestMetadata struct {
-	// Opaque JSON object forwarded verbatim to the authorizer, at most 4 KiB
+	// Opaque JSON object forwarded verbatim to the authorizer, at most 4 KB
 	Context json.RawMessage `json:"context,omitempty"`
 }
 

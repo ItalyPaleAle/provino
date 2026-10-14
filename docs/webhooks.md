@@ -28,7 +28,7 @@ A request asks for a notification with:
 "notify": { "endpoint": "app", "context": { "uploadId": "u_123" } }
 ```
 
-The `context` is any JSON object of at most 4 KiB, and it's echoed back in the event, so your handler can tie the event to whatever started the job.
+The `context` is any JSON object of at most 4 KB, and it's echoed back in the event, so your handler can tie the event to whatever started the job.
 
 ## Events
 
