@@ -1,11 +1,6 @@
 # Webhooks
 
-A job can report its outcome to your application with a webhook. Endpoints are named in the configuration, and a request picks one by name:
-
-- the authorizer's answer, for browser uploads;
-- the `notify` object of a client upload or optimize request.
-
-No URL ever comes from a request, so there is nothing a caller can point provino at.
+A job can report its outcome to your application with a webhook. Endpoints are named in the configuration, and whatever starts the job picks one by name: the authorizer's answer for a browser upload, or the `notify` object of a client upload or optimize request. No URL ever comes from a request, so there is nothing a caller can point provino at.
 
 ```yaml
 notify:
@@ -49,7 +44,7 @@ The body follows the Standard Webhooks payload structure:
     "imageId": "0b8cb0f7-2a1a-4f0f-9a9e-2b3a3f2f5f2a",
     "jobId": "019a7c3e-5b2d-7f41-9c8a-2d4e6f8a0b1c",
     "manifestKey": "default/0b/8c/0b8cb0f7-2a1a-4f0f-9a9e-2b3a3f2f5f2a_manifest.json",
-    "manifest": { "version": "provino/v1", "status": "completed", "variants": [ … ] },
+    "manifest": { "version": "provino/v1", "status": "completed", "variants": [ ... ] },
     "context": { "uploadId": "u_123" }
   }
 }
@@ -61,12 +56,11 @@ The body follows the Standard Webhooks payload structure:
 
 ## Delivery
 
-Delivery is a step of the job's durable workflow:
+Delivery is a step of the job's durable workflow. A `2xx` response acknowledges an event, and any other answer is retried with backoff. Redirects aren't followed, so a `3xx` counts as a failed attempt.
 
-- **Retries.** A `2xx` response acknowledges it, and anything else is retried with backoff. A job whose variants are stored completes even when its event is never acknowledged; the outcome is still in the manifest.
-- **Failure events.** These are retried up to five times while the job unwinds, then given up on.
-- **No redirects.** Redirects are never followed: a `3xx` is a failed attempt.
-- **Duplicates.** Deliveries are at least once, so a handler must be idempotent. Every attempt carries the same `webhook-id`, derived from the job ID and the event type, which a handler can use to recognize a repeat.
+A job whose variants are stored completes even if its event is never acknowledged, since the outcome is also in the manifest. An `image.failed` event is retried up to five times while the job unwinds, and then dropped.
+
+Deliveries are at least once, so a handler must be idempotent. Every attempt carries the same `webhook-id`, derived from the job ID and the event type, so a handler can recognize a repeat.
 
 ## Authentication
 
@@ -79,7 +73,7 @@ auth:
   type: hmac
   hmac:
     # Every listed secret signs, so a receiver can rotate by adding the new secret here first, then removing the old one once it has switched
-    secrets: [whsec_new…, whsec_old…]
+    secrets: [whsec_new..., whsec_old...]
 ```
 
 The request carries `webhook-signature: v1,<base64 HMAC-SHA256>`, with one `v1,` entry per secret, separated by spaces. The signature covers `<webhook-id>.<webhook-timestamp>.<body>`, using the bytes after `whsec_` decoded from base64 as the key. Generate a secret with:
@@ -112,7 +106,7 @@ Receivers need only the public keys, and provino publishes every configured key,
 2. Make it active once receivers have refreshed the set.
 3. Later, remove the old one.
 
-Keys are PEM-encoded (PKCS #8 for private keys, PKIX for public keys) or in the Standard Webhooks `whsk_…` and `whpk_…` forms:
+Keys are PEM-encoded (PKCS #8 for private keys, PKIX for public keys) or in the Standard Webhooks `whsk_...` and `whpk_...` forms:
 
 ```sh
 openssl genpkey -algorithm ed25519 -out webhook-2026-10.pem
@@ -127,7 +121,7 @@ auth:
   oauth2:
     tokenUrl: https://tenant.example.com/oauth/token
     clientId: provino
-    clientSecret: "…"
+    clientSecret: "..."
     scopes: [hooks:write]
     # Extra form parameters, for providers that need them
     endpointParams:
@@ -175,7 +169,7 @@ Verify a request before trusting anything in it:
 
 ### Go
 
-The `webhook` package implements all of it:
+The `webhook` package implements all of it. `HandleEvent` returns a handler that verifies the request, answering `401` when no signature matches, then decodes the event, passes it to your callback along with the request, and answers `204`:
 
 ```go
 import "github.com/italypaleale/provino/webhook"
@@ -186,24 +180,78 @@ verifier, err := webhook.NewVerifier(ctx, webhook.WithHMACSecrets(os.Getenv("PRO
 // Ed25519: trust the keys provino publishes, which also picks up a rotated key
 verifier, err := webhook.NewVerifier(ctx, webhook.WithJWKS("https://images.example.com/.well-known/provino-keys.json", nil))
 
-http.HandleFunc("POST /hooks/provino", func(w http.ResponseWriter, r *http.Request) {
-	body, err := verifier.VerifyRequest(r, 1<<20)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	var event webhook.Event
-	_ = json.Unmarshal(body, &event)
-	switch event.Type {
+http.HandleFunc("POST /hooks/provino", webhook.HandleEvent(verifier, func(r *http.Request, e *webhook.Event) error {
+	// r.Header.Get(webhook.HeaderID) is the same on every attempt, so it identifies a repeat
+	switch e.Type {
 	case webhook.EventImageOptimized:
-		// event.Data.Manifest lists every variant by key
+		// e.Data.Manifest lists every variant by key
 	case webhook.EventImageFailed:
-		// event.Data.Error says why
+		// e.Data.Error says why
 	}
-	w.WriteHeader(http.StatusNoContent)
-})
+	return nil
+}))
 ```
+
+An error from the callback answers `500`, so provino retries the delivery. The error itself isn't sent, so log it in the callback. For an event type it doesn't know, the callback should return `nil`, because a newer provino may send more.
+
+#### With OAuth2
+
+With `oauth2`, the request carries a bearer token rather than a signature. Pass a nil verifier, and check the token in a middleware in front of the handler. This example uses [`golang-jwt/jwt/v4`](https://pkg.go.dev/github.com/golang-jwt/jwt/v4) and [`MicahParks/keyfunc`](https://pkg.go.dev/github.com/MicahParks/keyfunc) v1, which fetches the provider's signing keys, with the provider and audience of the [`oauth2` configuration](#oauth2) above:
+
+```go
+import (
+	"github.com/MicahParks/keyfunc"
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/italypaleale/provino/webhook"
+)
+
+const (
+	issuer   = "https://tenant.example.com/"
+	audience = "https://app.example.com"
+	clientID = "provino"
+)
+
+// The claims of the access token provino gets from the client-credentials grant
+type tokenClaims struct {
+	jwt.RegisteredClaims
+	// The client the token was issued to; Auth0 and Entra ID name it `azp`, other providers may use `client_id` or `sub`
+	AuthorizedParty string `json:"azp"`
+}
+
+// The provider's signing keys, refreshed in the background, and fetched again when a token names a key that isn't known yet
+jwks, err := keyfunc.Get("https://tenant.example.com/.well-known/jwks.json", keyfunc.Options{
+	RefreshInterval:   time.Hour,
+	RefreshUnknownKID: true,
+})
+
+requireProvino := func(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// ParseWithClaims checks the signature and the expiry; the issuer, the audience and the client are checked here
+		// Checking the client matters: any client of the provider may be able to get a token for this audience
+		var claims tokenClaims
+		_, err := jwt.ParseWithClaims(token, &claims, jwks.Keyfunc, jwt.WithValidMethods([]string{"RS256"}))
+		if err != nil || !claims.VerifyIssuer(issuer, true) || !claims.VerifyAudience(audience, true) || claims.AuthorizedParty != clientID {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+http.Handle("POST /hooks/provino", requireProvino(webhook.HandleEvent(nil, func(r *http.Request, e *webhook.Event) error {
+	// ...
+	return nil
+})))
+```
+
+The authorizer is protected the same way, with `webhook.HandleAuthorize(nil, ...)` behind the same middleware.
 
 ### Other languages
 
@@ -218,7 +266,7 @@ export async function POST(req: Request) {
   const body = await req.text();
   // Throws when the signature doesn't match or the timestamp is out of range
   const event = wh.verify(body, Object.fromEntries(req.headers)) as ProvinoEvent;
-  // …
+  // ...
   return new Response(null, { status: 204 });
 }
 ```

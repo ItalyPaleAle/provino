@@ -1,4 +1,4 @@
-// Package webhook holds what an application needs to receive calls from provino: the events a job sends when it finishes, the authorizer contract provino calls before accepting a browser upload, and a verifier for both
+// Package webhook holds what an application needs to receive calls from provino: the events a job sends when it finishes, the authorizer contract provino calls before accepting a browser upload, HTTP handlers for both, and a verifier that checks their signatures
 //
 // Both directions follow the Standard Webhooks specification (https://www.standardwebhooks.com): a request carries the webhook-id, webhook-timestamp and webhook-signature headers, and the signature covers "<webhook-id>.<webhook-timestamp>.<body>"
 package webhook

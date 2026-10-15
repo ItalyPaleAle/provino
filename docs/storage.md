@@ -33,7 +33,7 @@ For example, `default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp`.
 
 - A variant's key is its actual size and format. Two variants of the same size and format are the same object, which is why a request can't ask for both with different encoder settings.
 - The extension of an original is its detected format: `jpg`, `png`, `webp`, `avif`, `heic` or `heif`.
-- New image IDs are UUIDv4s, so their leading characters spread evenly across the 256 × 256 folders. A v7 ID is accepted too, for an image that already has one, but its leading characters are a timestamp, so v7 images that were created close together share folders.
+- New image IDs are UUIDv4s, so their leading characters spread evenly across the 65,536 folders.
 
 The layout isn't configurable. Applications that compute keys in Go can use the [`imagekeys`](../imagekeys) package, but most don't need to: the manifest lists every key.
 
@@ -98,8 +98,8 @@ Every such box of one fit and format produces the same file, so only the tightes
 
 | Original | Boxes (`contain`) | Files |
 | --- | --- | --- |
-| 800×800 | 1000×1000, 2000×2000 | 800×800 for 1000×1000; 2000×2000 is skipped |
-| 1200×800 | 500×500, 1400×1400, 2048×2048 | 500×333, and 1200×800 for 1400×1400; 2048×2048 is skipped |
+| 800x800 | 1000x1000, 2000x2000 | 800x800 for 1000x1000; 2000x2000 is skipped |
+| 1200x800 | 500x500, 1400x1400, 2048x2048 | 500x333, and 1200x800 for 1400x1400; 2048x2048 is skipped |
 
 ### Changing an image's variants
 
