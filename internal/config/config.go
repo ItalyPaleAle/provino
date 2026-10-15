@@ -532,7 +532,7 @@ type ConfigActorsExternal struct {
 	BootstrapTokenFile string `yaml:"bootstrapTokenFile"`
 
 	// Path of a file containing the PEM-encoded cluster CA certificates this host trusts before its first connection to the runtime.
-	// Pinning the CA is what lets the host verify the runtime from the very first connection.
+	// With the CA pinned, the host can verify the runtime from the very first connection.
 	CAPath string `yaml:"caPath"`
 
 	// PEM-encoded cluster CA certificates, as an alternative to `caPath`.

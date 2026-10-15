@@ -8,18 +8,20 @@ Francis owns the actors, the workflow journal, retries, deadlines, retention and
 
 The jobs of one image run one at a time, in the order they were queued, so two jobs never write the same manifest at once. The `provino-image` actor, addressed as `<namespace>:<imageId>`, holds the queue. Francis forbids `/` in actor IDs, and a namespace can't contain `:`, so the two parts never run into each other.
 
-Its state is the active job, the jobs waiting behind it (each with its full `JobRequest`), and a short history of finished jobs:
+Its state is the active job, the jobs waiting behind it (each with its full `JobRequest`), and a short history of finished jobs. It has three methods and an alarm:
 
-- **`enqueue`** refuses a job when `images.maxQueuedJobs` are already waiting. Otherwise it mints a UUIDv7 job ID, appends the job, and starts it right away when nothing is active. It returns the job ID and its `position: 0` when it started, its place in the queue otherwise. A job whose workflow can't be started isn't accepted, so the caller finds out at once.
-- **`finished`**, called by the workflow when it ends, moves the active job to the history and starts the next one. A call about a job that isn't active is a repeat, and changes nothing.
-- **`job`**, a read-only peek, reports whether a job is active, queued (with its position) or recently finished, along with the hash of the subject that started it.
-- **The `check` alarm** is the safety net. It fires after the active job's deadline, after a failed start, and when the oldest history entry expires.
+| Method | What it does |
+| --- | --- |
+| `enqueue` | Refuses a job when `images.maxQueuedJobs` are already waiting. Otherwise it mints a UUIDv7 job ID, appends the job, and starts it right away when nothing is active. It returns the job ID and its `position: 0` when it started, its place in the queue otherwise. A job whose workflow can't be started isn't accepted, so the caller finds out at once |
+| `finished` | Called by the workflow when it ends, it moves the active job to the history and starts the next one. A call about a job that isn't active is a repeat, and changes nothing |
+| `job` | A read-only peek, which reports whether a job is active, queued (with its position) or recently finished, along with the hash of the subject that started it |
+| The `check` alarm | The safety net. It fires after the active job's deadline, after a failed start, and when the oldest history entry expires |
 
 The actor records a job as active before starting its workflow. If the process dies in between, the actor is left holding an active job whose workflow doesn't exist, and `heal` frees it: every `enqueue` and every alarm reads the active job's journal, and moves on when the workflow has ended or doesn't exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
 
 The actor holds the queue itself, rather than starting every job as a workflow parked on a `WaitForEvent` step, for two reasons. Francis counts a workflow's waiting time against its deadline. And `RaiseEvent` records nothing when it arrives before the wait step is open, while its idempotency key makes raising it again unreliable, so a "your turn" event could be lost.
 
-The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs). That is what lets a browser read the status of its own jobs after they finish. An image with nothing active, queued or remembered deletes its state, so the actors of every image ever uploaded don't accumulate.
+The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, queued or remembered deletes its state, so the actors of every image ever uploaded don't accumulate.
 
 ## Workflow definition
 

@@ -4,7 +4,7 @@
 
 Building and testing this project requires Go 1.27+.
 
-Generating variants requires libvips through cgo, so `CGO_ENABLED=1` and the libvips development headers are needed to build and test. The `Makefile` sets the environment variable; install the headers with `apt-get install libvips-dev` (and `libheif-plugin-aomenc`, which is what makes AVIF output work), or `brew install vips` on macOS.
+Generating variants requires libvips through cgo, so `CGO_ENABLED=1` and the libvips development headers are needed to build and test. The `Makefile` sets the environment variable; install the headers with `apt-get install libvips-dev` (and `libheif-plugin-aomenc`, which AVIF output needs), or `brew install vips` on macOS.
 
 Unit tests must be run with the `unit` build tag (`go test -tags unit ./...` or `make test`). The durable workflow tests in `internal/actors` skip themselves under the race detector, so run `make test-workflows` as well when changing the workflow.
 
@@ -64,19 +64,19 @@ require.NoError(t, err)
 - One sentence per line: do NOT wrap to a max line length
 - No trailing period on single-line comments
 - Prefer comments that explain intent, invariants, or why a branch exists
-- Avoid comments that simply restate the next line of code
+- Avoid comments that restate the next line of code
 - For multi-step logic, use short section comments to separate the steps and explain why each step exists
 - When adding or changing functions, add section comments before each major step so the method reads as a sequence of decisions
 - Section comments should make control-flow boundaries visually obvious, especially around validation, external calls, cache lookups, persistence, and error classification
 - Comments should briefly emphasize why the step exists or what invariant it protects
 
 ```go
-// Wrong — wrapped mid-sentence
+// Wrong: wrapped mid-sentence
 // This function performs the main validation logic. It checks
 // the input against the schema and returns an error if the
 // input is invalid.
 
-// Wrong — trailing period on single-line comment
+// Wrong: trailing period on single-line comment
 // Validate the input.
 
 // Right
@@ -93,11 +93,11 @@ require.NoError(t, err)
 // Read the previous manifest first so variants that still match are reused instead of encoded again
 previous, found, err := w.previousManifest(ctx, namespace, imageID)
 
-// Wrong — restates the code
+// Wrong: restates the code
 // Trim whitespace and lowercase the host
 host = strings.TrimSpace(strings.ToLower(host))
 
-// Wrong — names the operation without explaining the branch or invariant
+// Wrong: names the operation without explaining the branch or invariant
 // Get the manifest
 previous, found, err := w.previousManifest(ctx, namespace, imageID)
 ```
@@ -110,7 +110,7 @@ Variant generation uses Francis' built-in workflow engine. Workflow tasks are de
 
 ## Markdown
 
-Do not hard-wrap Markdown prose or limit it to a maximum line length
+Do not hard-wrap Markdown prose or limit it to a maximum line length.
 
 ## Running the Go linter
 

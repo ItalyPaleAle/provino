@@ -60,7 +60,7 @@ To serve on another port, change the host side of `ports` in `compose.yaml`. Cha
 
 [`provino.kube`](./provino.kube) is a Quadlet unit that plays the pod in [`provino.yaml`](./provino.yaml). Quadlet needs Podman 4.4 or newer.
 
-Installed as a user unit, Podman itself runs unprivileged too, so nothing here runs as root.
+Installed as a user unit, it runs under rootless Podman, so nothing here runs as root.
 
 ### Installing
 
@@ -72,7 +72,7 @@ systemctl --user daemon-reload
 systemctl --user start provino
 ```
 
-There is no `systemctl --user enable`: Quadlet generates the unit from the `[Install]` section, so `daemon-reload` is what installs it, and it starts on login from then on.
+There is no `systemctl --user enable`: Quadlet generates the unit from the `[Install]` section, so `daemon-reload` installs it, and it starts on login from then on.
 
 To have it start at boot rather than at login, and keep running after logout, enable lingering for the user once:
 
@@ -113,9 +113,9 @@ systemctl --user start provino
 
 ### Health checks
 
-The manifest carries a startup probe and a liveness probe, both running the `curl` the image already carries for its own `HEALTHCHECK`. `podman kube play` turns them into container health checks. The startup probe is what gives the first run room to migrate the actor database before the liveness probe starts counting failures.
+The manifest carries a startup probe and a liveness probe, both running the `curl` the image already carries for its own `HEALTHCHECK`. `podman kube play` turns them into container health checks. The startup probe gives the first run time to migrate the actor database before the liveness probe starts counting failures.
 
-There is no readiness probe: Podman has nothing to do with one, since a pod it plays has no service in front of it to be removed from.
+There is no readiness probe, because a pod Podman plays has no service in front of it to take the pod out of.
 
 ### Changing the configuration
 
@@ -124,7 +124,7 @@ The service's configuration is the `provino-config` Secret in the same file, mou
 Before the first start, replace every example value:
 
 - `server.publicUrl` is provino's public origin, which is also the default audience of the JWTs it accepts, and `server.corsAllowedOrigins` lists the pages browsers upload from.
-- `auth.jwt.issuer` is your identity provider. `auth.apiKeys` lists the keys backends call the client API with, each by its SHA-256 so the key itself isn't in the manifest. See [deploying](../docs/deploying.md#authentication) for how to generate one.
+- `auth.jwt.issuer` is your identity provider. `auth.apiKeys` lists the keys backends call the client API with, each by its SHA-256 so the key itself isn't in the manifest. See [deploying](../docs/deploying.md#api-keys) for how to generate one.
 - `authorizer.http` is the endpoint that decides each browser upload, see [the authorizer](../docs/authorizer.md), and `notify.endpoints` are where jobs report their outcome, see [webhooks](../docs/webhooks.md). Both are signed with a `whsec_` secret your application verifies.
 
 The example uses local storage to make the pod self-contained. To serve the variants from object storage, point `storage.originals` and `storage.variants` at an S3 or Vercel Blob store instead; see [storage](../docs/storage.md).
@@ -132,7 +132,7 @@ The example uses local storage to make the pod self-contained. To serve the vari
 The defaults suit a single instance. Running more than one, on separate hosts, takes four changes:
 
 - `actors.database` has to be Postgres rather than SQLite, because the instances share the job state.
-- `actors.runtimePSK` has to be set, since it is what the instances derive their mutual-TLS CA from. A random one is generated at startup when it is empty, which cannot work across instances. Generate it with `openssl rand -base64 32`.
+- `actors.runtimePSK` has to be set, since the instances derive their mutual-TLS CA from it. A random one is generated at startup when it is empty, which cannot work across instances. Generate it with `openssl rand -base64 32`.
 - `actors.address` has to be an address the other instances can reach, with its UDP port published, because that is where they send each other work.
 - `storage.originals` and `storage.variants` have to point at a store every instance reaches, such as S3, rather than at the local volume.
 
@@ -142,6 +142,6 @@ If the service sits behind a reverse proxy, set `server.trustedProxies` to the p
 
 ### Publishing on another port
 
-`PublishPort` in the unit maps the host port; `server.port` in the Secret is what the service listens on inside the pod. Changing the port the service listens on means changing both, plus the port in the two probes.
+`PublishPort` in the unit maps the host port, and `server.port` in the Secret sets the port the service listens on inside the pod. Changing the port the service listens on means changing both, plus the port in the two probes.
 
 The actor host also listens on `actors.address`, which defaults to `127.0.0.1:7571`. It is only used by other actor hosts, so a single-instance pod never receives a connection on it, and it is deliberately not published.

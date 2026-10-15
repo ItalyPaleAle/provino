@@ -4,12 +4,12 @@ provino is a high-performance HTTP service that stores the images your users upl
 
 - **Browsers upload directly.** An upload goes straight from the browser to provino, and an *authorizer* you control (an HTTP endpoint you run, or a static block in the config) decides its namespace, how large it may be, and which variants to generate.
 - **Backends upload and re-render.** A trusted backend can upload images and ask for new variants of existing ones through the client API.
-- **One or more replicas.** provino is built on top of the [Francis](https://gofrancis.dev) actor framework, which allows running a single instance or scaling horizontally to many replicas, to handle more concurrent requests.
-- **Durable workflows.** Every upload and every request for variants is run by a durable workflow built on Francis. Workflows survive a restart of the service and gracefully handle failures and compensations.
+- **One or more replicas.** provino is built on the [Francis](https://gofrancis.dev) actor framework, so it can run as a single instance or scale out to many replicas to handle more concurrent requests.
+- **Durable workflows.** Every upload and every request for variants runs as a durable workflow built on Francis. A workflow survives a restart of the service, and a job that fails undoes the changes it made.
 - **Signed webhooks.** A job reports its outcome to the endpoints named in the configuration, signed following the [Standard Webhooks](https://www.standardwebhooks.com) specification (HMAC or Ed25519), or authenticated with an OAuth2 client-credentials token.
-- **Your storage.** Originals and variants live in the object store you choose next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, usually through a CDN. Supported storages:
+- **Your storage.** Originals and variants live in the object store you choose, next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, usually through a CDN. Supported storages:
    - Local file system
-   - AWS S3 or S3-compatbile endpoints
+   - AWS S3 or S3-compatible endpoints
    - Vercel Blob
 
 provino never makes a variant larger than its source, reuses the variants that are already stored when a set changes, and detects every upload's format from its content rather than its name.
@@ -32,7 +32,7 @@ sequenceDiagram
     Note over P: The job waits for its image's queue, then runs
     P->>S: Store the variants and the completed manifest
     P->>W: image.optimized (signed)
-    B->>P: GET /v1/public/images/…/jobs/{jobId}
+    B->>P: GET /v1/public/images/.../jobs/{jobId}
 ```
 
 A backend does the same through `POST /v1/client/upload`, without the authorizer, and asks for new variants of an existing image with `POST /v1/client/optimize`.
@@ -80,7 +80,7 @@ storage:
 curl -s http://127.0.0.1:3000/v1/public/ingest \
   -H "Authorization: Bearer pvk_dev_0123456789abcdefghijklmnop" \
   -F 'image=@photo.jpg'
-# {"namespace":"default","imageId":"…","jobId":"…","status":"queued",…}
+# {"namespace":"default","imageId":"...","jobId":"...","status":"queued",...}
 
 curl -s http://127.0.0.1:3000/v1/client/images/default/<imageId>/jobs/<jobId> \
   -H "Authorization: Bearer pvk_dev_0123456789abcdefghijklmnop"
@@ -102,12 +102,11 @@ The OpenAPI document is served at `/.openapi`, and as `/.openapi/provino.json` a
 | `GET /.well-known/provino-keys.json` | Webhook receivers | The Ed25519 keys provino signs with |
 | `GET /healthz` | Health checks | Liveness |
 
-Uploads and optimize requests answer `202 Accepted` with a job ID, as soon as the job is queued.
+Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job is queued.
 
-- **Uploads** are `multipart/form-data`, with the `metadata` part first and the `image` part after it. That order is what lets provino stream the image straight to the store.
-- **A variant** is `{"format": "webp", "quality": 80, "effort": 5, "size": {"width": 1200, "height": 400}, "fit": "contain"}`.
-  - The formats are `webp`, `avif`, `jpeg` and `png`, and the fit is `contain` (the default) or `cover`.
-- **Accepted source formats** are JPEG, PNG, WebP, AVIF and HEIC/HEIF.
+- An upload is `multipart/form-data`, with the `metadata` part before the `image` part, so provino can stream the image straight to the store.
+- A variant looks like `{"format": "webp", "quality": 80, "effort": 5, "size": {"width": 1200, "height": 400}, "fit": "contain"}`. Its format is `webp`, `avif`, `jpeg` or `png`, and its fit is `contain` (the default) or `cover`.
+- A source can be JPEG, PNG, WebP, AVIF or HEIC/HEIF.
 
 Callers authenticate with a JWT from an OpenID Connect provider, with an API key, or with nothing at all in development. Only the public routes answer cross-origin requests, from the origins in `server.corsAllowedOrigins`.
 
@@ -128,7 +127,7 @@ Applications written in Go can use these packages, which don't need cgo:
 | Package | Contents |
 | --- | --- |
 | [`client`](client) | Calls to the client API, and the API's request and response types |
-| [`webhook`](webhook) | The event and authorizer types, and a Standard Webhooks verifier |
+| [`webhook`](webhook) | The event and authorizer types, HTTP handlers for both, and a Standard Webhooks verifier |
 | [`manifest`](manifest) | The manifest's types and a parser |
 | [`variant`](variant) | The variant spec, formats and fits |
 | [`imagekeys`](imagekeys) | The object key layout |

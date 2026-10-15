@@ -27,7 +27,7 @@ config:
         scopes: [server]
 ```
 
-[Deploying](../docs/deploying.md#authentication) shows how to generate an API key and its digest.
+[Deploying](../docs/deploying.md#api-keys) shows how to generate an API key and its digest.
 
 Every release publishes the chart as an OCI artifact to the GitHub Container Registry, alongside the image:
 
@@ -58,10 +58,10 @@ helm test provino -n provino
 
 The chart sets a few options itself, and fails the install if `config` sets them too:
 
-- **`server.bind` and `server.port`.** They're set from `ports.http`, since the container port, the probes, and the Services all depend on them.
-- **`actors.address`, `actors.bindAddress`, and `actors.bindPort`.** Every pod advertises its own IP to the other actor hosts, which is something a shared config file can't express. The chart passes `$(POD_IP):<ports.peers>` in the `PROVINO_ACTORS_ADDRESS` env var instead, which overrides `actors.address`.
+- `server.bind` and `server.port` come from `ports.http`, since the container port, the probes and the Services all depend on them.
+- `actors.address`, `actors.bindAddress` and `actors.bindPort` come from the pod. Every pod advertises its own IP to the other actor hosts, which a shared config file can't express, so the chart passes `$(POD_IP):<ports.peers>` in the `PROVINO_ACTORS_ADDRESS` env var, which overrides `actors.address`.
 
-Everything else keeps provino's defaults when it's left out. Those defaults are relative to the image's working directory, `/var/lib/provino`, which is why the data volume is mounted at `/var/lib/provino/data`: that is where `storage.originals`, `storage.variants`, and the SQLite `actors.database` point.
+Everything else keeps provino's defaults when it's left out. Those defaults are relative to the image's working directory, `/var/lib/provino`, so the data volume is mounted at `/var/lib/provino/data`, where `storage.originals`, `storage.variants` and the SQLite `actors.database` point.
 
 The chart also checks the configuration it renders, so a values file that can't work fails at install time with a message saying what to change, rather than in a crash-looping pod.
 
@@ -119,7 +119,7 @@ config:
 
 The replicas reach each other on `ports.peers` (UDP 7571), by pod IP. A NetworkPolicy has to allow that port between the release's pods. The port is published on the headless Service only, and never needs to be reachable from outside the release.
 
-Do not put the SQLite database on a networked file system such as NFS or SMB. Use a block-backed `ReadWriteOnce` volume, which is what the chart requests by default.
+Do not put the SQLite database on a networked file system such as NFS or SMB. Use a block-backed `ReadWriteOnce` volume, the kind the chart requests by default.
 
 ### Moving from one replica to several
 
@@ -163,11 +163,9 @@ httpRoute:
   hostnames: [images.example.com]
 ```
 
-Behind either one:
+Behind either one, set `config.server.publicUrl` to the public origin, and list the addresses the proxy connects from in `config.server.trustedProxies`, or rate limiting sees every upload as coming from the proxy.
 
-- **`config.server.publicUrl`.** Set it to the public origin.
-- **`config.server.trustedProxies`.** List the addresses the proxy connects from, or rate limiting sees every upload as coming from the proxy.
-- **Body size limit.** Raise the proxy's limit on request bodies to at least `config.images.maxUploadSize`, which is 32 MiB by default. Its read timeout also has to allow for a slow upload, up to `config.server.readTimeout`.
+The proxy's limit on request bodies has to be at least `config.images.maxUploadSize`, which is 32 MiB by default, and its read timeout has to allow for a slow upload, up to `config.server.readTimeout`.
 
 The probes use HTTPS when `config.server.tls` names a certificate, and HTTP otherwise.
 
@@ -190,10 +188,10 @@ config:
       # The runtime's cluster CA, from `francis print-ca`
       caPEM: |
         -----BEGIN CERTIFICATE-----
-        …
+        ...
   storage:
-    originals: s3://…
-    variants: s3://…
+    originals: s3://...
+    variants: s3://...
 projectedServiceAccountTokens:
   - name: francis
     audience: francis-runtime
@@ -320,7 +318,7 @@ The identity provider has to trust the cluster's service account issuer for this
 
 Jobs are durable, so a rolling upgrade resumes the ones that were running when their pod stopped. A release that changes the job workflow's definition gives it a new version, which lets Francis finish the jobs that started under the old one.
 
-The data volume's claim template is fixed when the StatefulSet is created, and Kubernetes refuses an upgrade that changes it with `Forbidden: updates to statefulset spec for fields other than … are forbidden`. That covers every change to `persistence` (turning it on or off, switching to an `existingClaim`, and changing `size`, `storageClass`, `accessModes`, or `annotations`), and to `commonAnnotations` while the chart creates the claim.
+The data volume's claim template is fixed when the StatefulSet is created, and Kubernetes refuses an upgrade that changes it with `Forbidden: updates to statefulset spec for fields other than ... are forbidden`. That covers every change to `persistence` (turning it on or off, switching to an `existingClaim`, and changing `size`, `storageClass`, `accessModes`, or `annotations`), and to `commonAnnotations` while the chart creates the claim.
 
 To apply one of these, delete the StatefulSet with `--cascade=orphan`, which keeps the pods running and the claims in place, then upgrade:
 

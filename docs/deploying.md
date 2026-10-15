@@ -29,7 +29,9 @@ Ready-made deployments run the image unprivileged, with a read-only root file sy
 
 Configure at least one way for callers to authenticate.
 
-**JWTs** from an OpenID Connect provider are how browsers usually authenticate:
+### JWTs
+
+Browsers usually authenticate with a JWT from an OpenID Connect provider:
 
 ```yaml
 auth:
@@ -39,18 +41,20 @@ auth:
     audience: https://images.example.com
 ```
 
-- **Key set.** It's discovered from `<issuer>/.well-known/openid-configuration` and refreshed in the background. A discovered key set and every redirect must stay on the issuer's origin. Startup fails if the key set can't be fetched.
-- **Algorithms.** The key set decides which signature algorithms a token may use, but a symmetric algorithm is never accepted.
-- **Claims.** Set `jwksUrl` for a provider that doesn't publish discovery, and `subjectClaim` or `scopeClaim` for one that names its claims differently.
+The key set is discovered from `<issuer>/.well-known/openid-configuration` and refreshed in the background. The discovered key set, and every redirect, must stay on the issuer's origin, and startup fails if the key set can't be fetched. Set `jwksUrl` for a provider that doesn't publish discovery, and `subjectClaim` or `scopeClaim` for one that names its claims differently.
 
-**API keys** are the simplest credential for a backend:
+The key set decides which signature algorithms a token may use, but a symmetric algorithm, or `none`, is never accepted.
+
+### API keys
+
+An API key is the simplest credential for a backend:
 
 ```yaml
 auth:
   apiKeys:
     - id: backend
       # The SHA-256 of the key, so the key itself isn't in the configuration
-      sha256: "…"
+      sha256: "..."
       scopes: [server]
 ```
 
@@ -64,7 +68,9 @@ printf '%s' "$KEY" | sha256sum
 
 A caller needs the `ingest` scope for `/v1/public/*` and the `server` scope for `/v1/client/*`. Rename them with `auth.scopes`, or set one to an empty string to accept any authenticated caller.
 
-**For development only**, `auth.none.enabled: true` accepts every request without credentials.
+### No authentication
+
+For development only, `auth.none.enabled: true` accepts every request without credentials.
 
 ## Browser uploads
 
@@ -84,12 +90,11 @@ An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, 
 
 ## The actor runtime
 
-Jobs run on [Francis](https://gofrancis.dev), in one of two topologies selected by `actors.runtime`:
+Jobs run on [Francis](https://gofrancis.dev), in one of two topologies selected by `actors.runtime`.
 
-- **`embedded`** (the default) runs the actor runtime inside this process, and keeps its state in the database at `actors.database`.
-  - SQLite (the default, `sqlite://./data/actors.db`) is enough for a single instance.
-  - To run several instances against the same jobs, point them all at the same Postgres database, and give them the same `actors.runtimePSK`, which their mutual TLS is derived from.
-- **`external`** makes this process an actor host only. It connects to a standalone Francis runtime that owns placement, scheduling, and the database:
+With `embedded`, the default, the actor runtime runs inside this process and keeps its state in the database at `actors.database`. SQLite (the default, `sqlite://./data/actors.db`) is enough for a single instance. To run several instances against the same jobs, point them all at the same Postgres database and give them the same `actors.runtimePSK`, which their mutual TLS is derived from.
+
+With `external`, this process is only an actor host. It connects to a standalone Francis runtime that owns placement, scheduling and the database:
 
 ```yaml
 actors:
@@ -99,8 +104,8 @@ actors:
   external:
     addresses: ["francis-runtime.internal:7570"]
     # Exactly one of bootstrapPSK and bootstrapTokenFile
-    bootstrapPSK: "…"
-    # Pinning the cluster CA is what lets this host verify the runtime on its first connection
+    bootstrapPSK: "..."
+    # With the cluster CA pinned, this host can verify the runtime on its first connection
     caPath: /etc/provino/cluster-ca.pem
 ```
 
@@ -110,9 +115,11 @@ The address is the one other hosts dial, so each instance needs its own. When th
 
 ### Capacity
 
-- **Encoding.** `images.maxConcurrentEncodes` (default: the number of CPUs the process can use, which follows a container's CPU limit) bounds how many variants a host encodes at once. libvips is set to one thread per operation, so this is the only concurrency setting. Work beyond it waits, or moves to another host.
-- **Per image.** `images.maxQueuedJobs` (default 10) bounds how many jobs can wait for one image while another of its jobs runs. Beyond it, requests get `429 queue_full`.
-- **Time budgets.** `actors.workflowTimeout` (default 10 minutes) is each step's execution budget, and six times that is a job's deadline.
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `images.maxConcurrentEncodes` | The number of CPUs the process can use, which follows a container's CPU limit | How many variants a host encodes at once. libvips runs one thread per operation, so this is the only concurrency setting. Work beyond it waits, or moves to another host |
+| `images.maxQueuedJobs` | 10 | How many jobs can wait for one image while another of its jobs runs. Beyond it, requests get `429 queue_full` |
+| `actors.workflowTimeout` | 10 minutes | How long one attempt at a step may run. Six times that is a job's deadline |
 
 ### Status retention
 
@@ -126,4 +133,4 @@ The cache only holds copies, so every part of it is best-effort. A job removes i
 
 ## Upgrading
 
-Jobs are durable across restarts, so a rolling restart resumes the jobs that were running. A release that changes the workflow's definition increments its version, which is what lets Francis keep running the jobs that started under the previous definition.
+Jobs are durable across restarts, so a rolling restart resumes the jobs that were running. A release that changes the workflow's definition increments its version, so Francis can keep running the jobs that started under the previous definition.
