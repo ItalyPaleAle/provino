@@ -195,9 +195,17 @@ func (c *Client) Job(ctx context.Context, namespace string, imageID string, jobI
 	return status, nil
 }
 
+// DefaultPollInterval is how often WaitForJob polls when it's given no interval
+const DefaultPollInterval = time.Second
+
 // WaitForJob polls a job until it completes or fails, returning its final status
+// An interval of zero or less polls every DefaultPollInterval
 // Prefer a webhook when one is configured: it reports the outcome without a request every interval
 func (c *Client) WaitForJob(ctx context.Context, namespace string, imageID string, jobID string, interval time.Duration) (JobStatus, error) {
+	// A ticker panics on an interval that isn't positive, which a caller that leaves it unset shouldn't hit
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

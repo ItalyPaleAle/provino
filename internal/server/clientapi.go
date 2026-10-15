@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 	"uuid"
@@ -18,6 +17,7 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 	"github.com/italypaleale/provino/internal/actors"
 	"github.com/italypaleale/provino/internal/config"
+	"github.com/italypaleale/provino/internal/sniff"
 	"github.com/italypaleale/provino/variant"
 )
 
@@ -78,6 +78,14 @@ func (s *Server) RouteUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An ID the caller chose may already be in use, which is checked before a byte of the image is read
+	err = s.claimImageID(ctx, &in)
+	if err != nil {
+		s.respondWithError(w, r, err)
+		return
+	}
+	defer s.releaseImageID(ctx, in)
+
 	source, err := s.storeUpload(ctx, part, in)
 	if err != nil {
 		s.respondWithError(w, r, err)
@@ -111,7 +119,8 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 
 	// A new image always gets a v4 ID, which is what keeps the storage folders balanced
 	imageID := uuid.NewV4()
-	if metadata.ImageID != "" {
+	idChosen := metadata.ImageID != ""
+	if idChosen {
 		imageID, err = imagekeys.ValidateID(metadata.ImageID)
 		if err != nil {
 			return upload{}, errInvalidImageID.Clone(httpserver.WithInnerError(err))
@@ -135,6 +144,7 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 		allowedFormats: config.SourceFormats,
 		variants:       variants,
 		notify:         notification,
+		idChosen:       idChosen,
 	}, nil
 }
 
@@ -195,11 +205,9 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 
 	sourceFormat := ""
 	if req.SourceFormat != "" {
-		sourceFormat = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(req.SourceFormat), "."))
-		if sourceFormat == "jpeg" {
-			sourceFormat = "jpg"
-		}
-		if !slices.Contains(config.SourceFormats, sourceFormat) {
+		var ok bool
+		sourceFormat, ok = sniff.NormalizeFormat(req.SourceFormat)
+		if !ok {
 			errInvalidFormat.Clone(httpserver.WithInnerError(fmt.Errorf("'%s' is not one of %s", req.SourceFormat, strings.Join(config.SourceFormats, ", ")))).WriteResponse(w, r)
 			return
 		}

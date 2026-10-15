@@ -38,6 +38,9 @@ const (
 	imagePartName    = "image"
 )
 
+// How much longer than the slowest upload the server accepts an image ID claim lasts when the upload never releases it
+const claimTTLMargin = time.Minute
+
 // upload describes an upload that is allowed, before its image is read
 type upload struct {
 	namespace      string
@@ -47,6 +50,67 @@ type upload struct {
 	variants       []variant.Spec
 	notify         *webhook.Notify
 	subjectHash    string
+	// True when the caller named the image ID rather than leaving it to this service to mint
+	idChosen bool
+	// Token of the claim on the image ID, held while the upload stores it
+	claimToken string
+}
+
+// Hold an image ID the caller chose for this upload, and refuse one that is already in use
+//
+// A minted ID is new by construction, so only an ID the caller chose needs the claim and the lookup
+// The claim comes first, so no other upload can store the same ID between the lookup below and the write that follows it
+func (s *Server) claimImageID(ctx context.Context, in *upload) error {
+	if !in.idChosen {
+		return nil
+	}
+
+	// The claim outlives the slowest upload the server lets a client send, and the release after the job is queued is what normally ends it
+	token := uuid.NewV4().String()
+	ttl := config.Get().Server.ReadTimeout + claimTTLMargin
+	claimed, err := s.jobs.ClaimUpload(ctx, in.namespace, in.imageID.String(), token, ttl)
+	if err != nil {
+		return fmt.Errorf("failed to claim the image ID: %w", err)
+	}
+	if !claimed {
+		return errImageExists
+	}
+	in.claimToken = token
+
+	// An image is spent by its first upload, whatever format either of them is in
+	exists, err := s.store.ImageExists(ctx, in.namespace, in.imageID)
+	if err != nil || exists {
+		s.releaseImageID(ctx, *in)
+		in.claimToken = ""
+	}
+	if err != nil {
+		return fmt.Errorf("failed to look up the image: %w", err)
+	}
+	if exists {
+		return errImageExists
+	}
+
+	return nil
+}
+
+// Give up the claim on an image ID, once the upload's job is queued or the upload failed
+// The claim expires on its own, so a release that fails is only logged
+func (s *Server) releaseImageID(ctx context.Context, in upload) {
+	if in.claimToken == "" {
+		return
+	}
+
+	// The request's context is often already canceled at this point, so the release gets one of its own
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	err := s.jobs.ReleaseUpload(ctx, in.namespace, in.imageID.String(), in.claimToken)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to release the claim on an image ID, which will expire on its own",
+			slog.String("namespace", in.namespace),
+			slog.String("imageId", in.imageID.String()),
+			slog.Any("error", err),
+		)
+	}
 }
 
 // readMetadataPart reads the metadata part when it's the next part, returning the part after it
@@ -131,13 +195,15 @@ func (s *Server) storeUpload(ctx context.Context, part *multipart.Part, in uploa
 
 	_, size, err := s.store.SaveOriginal(ctx, in.namespace, in.imageID, format, io.TeeReader(buffered, tmp), maxSize, contentType)
 	switch {
-	case errors.Is(err, store.ErrAlreadyExists):
-		return actors.JobSource{}, errImageExists
 	case errors.Is(err, store.ErrTooLarge):
 		return actors.JobSource{}, errImageTooLarge.Clone(httpserver.WithMetadata(map[string]string{"maximum": strconv.FormatInt(maxSize, 10)}))
 	case err != nil:
 		return actors.JobSource{}, fmt.Errorf("failed to store the uploaded image: %w", err)
 	}
+
+	// The copy reaches the disk before it's published, as a download into the cache does, so a host that stops right after is never followed by a job that reads a truncated source and fails it as unreadable
+	// The cache only saves a download, so a copy that can't be flushed is used for measuring and then not kept
+	syncErr := tmp.Sync()
 
 	// From here on the original is stored, so every rejection removes it
 	source, err := s.measureUpload(ctx, tmp)
@@ -151,7 +217,11 @@ func (s *Server) storeUpload(ctx context.Context, part *multipart.Part, in uploa
 	source.StoredAt = time.Now().UTC()
 
 	// The cache only saves a download, so failing to keep the copy doesn't fail the upload
-	err = s.sourceCache.Adopt(tmp.Name(), in.namespace, in.imageID)
+	if syncErr == nil {
+		err = s.sourceCache.Adopt(tmp.Name(), in.namespace, in.imageID)
+	} else {
+		err = fmt.Errorf("failed to flush the copy: %w", syncErr)
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to keep the uploaded image in the source cache", slog.Any("error", err))
 	} else {

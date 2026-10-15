@@ -52,7 +52,7 @@ The body follows the Standard Webhooks payload structure:
 
 - `data.manifest` is the manifest the job wrote. On `image.failed` it's the manifest the image is left with, which is absent when the image had none.
 - `data.error` is set on `image.failed`. It starts with `image_not_found` when the image's original doesn't exist.
-- `timestamp` is when the event happened, and it stays the same across delivery attempts.
+- `timestamp` is when the event happened, and it stays the same across delivery attempts: when the job completed, or for `image.failed`, when its failure freed the image's queue.
 
 ## Delivery
 
@@ -178,7 +178,9 @@ import "github.com/italypaleale/provino/webhook"
 verifier, err := webhook.NewVerifier(ctx, webhook.WithHMACSecrets(os.Getenv("PROVINO_WEBHOOK_SECRET")))
 
 // Ed25519: trust the keys provino publishes, which also picks up a rotated key
+// The set is refreshed in the background until Close; a refresh that fails keeps the keys fetched last
 verifier, err := webhook.NewVerifier(ctx, webhook.WithJWKS("https://images.example.com/.well-known/provino-keys.json", nil))
+defer verifier.Close(context.Background())
 
 http.HandleFunc("POST /hooks/provino", webhook.HandleEvent(verifier, func(r *http.Request, e *webhook.Event) error {
 	// r.Header.Get(webhook.HeaderID) is the same on every attempt, so it identifies a repeat

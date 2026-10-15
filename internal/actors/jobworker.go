@@ -14,6 +14,7 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 	"github.com/italypaleale/provino/internal/imaging"
 	"github.com/italypaleale/provino/internal/store"
+	"github.com/italypaleale/provino/manifest"
 )
 
 // Generate one variant and return its result to the workflow journal
@@ -77,7 +78,7 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	}
 
 	start := time.Now()
-	res, err := w.encode(ctx, task)
+	res, kept, err := w.encode(ctx, task)
 	duration := time.Since(start)
 
 	result.DurationMs = duration.Milliseconds()
@@ -90,6 +91,19 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 		}
 		log.ErrorContext(ctx, "Failed to generate variant", slog.Any("error", err))
 		return result, fmt.Errorf("failed to generate variant '%s': %w", task.Spec.Name, err)
+	}
+
+	// The encode came out as a file another variant reuses with the same settings, so that stored file describes this variant too
+	if kept != nil {
+		result.Width = kept.Width
+		result.Height = kept.Height
+		result.Size = kept.Size
+		result.Reused = kept
+		log.DebugContext(ctx, "Kept a stored file another variant reuses, since the encode came out as the same file",
+			slog.Int("width", kept.Width),
+			slog.Int("height", kept.Height),
+		)
+		return result, nil
 	}
 
 	result.Width = res.Width
@@ -110,20 +124,21 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 }
 
 // Read the source image, encode the variant, and write it back to the store
-func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (imaging.Result, error) {
+// When the encode comes out as a stored file another variant of the job reuses with the same settings, nothing is written and that file's entry is returned instead
+func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (imaging.Result, *manifest.Variant, error) {
 	// Durable workflow input is re-checked where it becomes an object key
 	namespace, imageID, err := taskIDs(task)
 	if err != nil {
-		return imaging.Result{}, fmt.Errorf("%w: %w", imaging.ErrInvalidRequest, err)
+		return imaging.Result{}, nil, fmt.Errorf("%w: %w", imaging.ErrInvalidRequest, err)
 	}
 
 	// A fan-out task may run on another host than prepare, so a local cache miss downloads the source on demand
 	source, err := w.runtime.SourceCache.Read(ctx, namespace, imageID, task.SourceFormat)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrTooLarge) {
-			return imaging.Result{}, fmt.Errorf("%w: %w", imaging.ErrSourceUnreadable, err)
+			return imaging.Result{}, nil, fmt.Errorf("%w: %w", imaging.ErrSourceUnreadable, err)
 		}
-		return imaging.Result{}, fmt.Errorf("failed to read the source image: %w", err)
+		return imaging.Result{}, nil, fmt.Errorf("failed to read the source image: %w", err)
 	}
 
 	res, err := w.runtime.Encoder.Generate(ctx, imaging.Request{
@@ -135,16 +150,26 @@ func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (ima
 		Fit:        task.Spec.Fit,
 	})
 	if err != nil {
-		return imaging.Result{}, fmt.Errorf("failed to encode the variant: %w", err)
+		return imaging.Result{}, nil, fmt.Errorf("failed to encode the variant: %w", err)
+	}
+
+	// A file another variant reuses is kept as it is, because its manifest entry describes those exact bytes and a failed job puts that entry back
+	// Encoding it again with the same settings changes nothing, while different settings would leave one of the two entries describing the wrong file
+	reserved, found := task.reservedAt(res.Width, res.Height, task.Spec.Format)
+	if found {
+		if reserved.Stored.Quality != task.Spec.Quality || reserved.Stored.Effort != task.Spec.Effort {
+			return imaging.Result{}, nil, fmt.Errorf("%w: variant '%s' (quality %d, effort %d) comes out as the %dx%d%s file, which variant '%s' reuses as stored with quality %d and effort %d: give them the same quality and effort", imaging.ErrInvalidRequest, task.Spec.Name, task.Spec.Quality, task.Spec.Effort, res.Width, res.Height, task.Spec.Format.Extension(), reserved.Name, reserved.Stored.Quality, reserved.Stored.Effort)
+		}
+		return res, &reserved.Stored, nil
 	}
 
 	// A retried workflow task writes the same key, so the last complete encode wins without leaving duplicates
 	err = w.runtime.Store.SaveVariant(ctx, namespace, imageID, res.Width, res.Height, task.Spec.Format.Extension(), res.Data, task.Spec.Format.ContentType())
 	if err != nil {
-		return imaging.Result{}, fmt.Errorf("failed to store the variant: %w", err)
+		return imaging.Result{}, nil, fmt.Errorf("failed to store the variant: %w", err)
 	}
 
-	return res, nil
+	return res, nil, nil
 }
 
 // Delete one variant when a later task fails and Francis unwinds the fan-out

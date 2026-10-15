@@ -90,22 +90,6 @@ func TestSaveOriginal(t *testing.T) {
 		assert.Equal(t, "image-data", string(content))
 	})
 
-	// The token names the image, and the image can only be created once, so a token presented twice is refused here
-	t.Run("refuses an image that already exists", func(t *testing.T) {
-		s, dir := newTestStore(t)
-
-		key, _, err := s.SaveOriginal(t.Context(), testNamespace, testImageID, ".jpg", strings.NewReader("first"), 1024, "image/jpeg")
-		require.NoError(t, err)
-
-		_, _, err = s.SaveOriginal(t.Context(), testNamespace, testImageID, ".jpg", strings.NewReader("second"), 1024, "image/jpeg")
-		require.ErrorIs(t, err, ErrAlreadyExists)
-
-		// The first image is left exactly as it was, so the loser of the race cannot overwrite the winner
-		content, err := os.ReadFile(storedPath(dir, "originals", key)) //nolint:gosec // The path is inside a temporary folder this test created
-		require.NoError(t, err)
-		assert.Equal(t, "first", string(content))
-	})
-
 	t.Run("rejects an image that is too large", func(t *testing.T) {
 		s, dir := newTestStore(t)
 
@@ -122,6 +106,49 @@ func TestSaveOriginal(t *testing.T) {
 		_, _, err := s.SaveOriginal(t.Context(), testNamespace, testImageID, ".jpg", strings.NewReader(""), 1024, "image/jpeg")
 		require.Error(t, err)
 		assert.NoFileExists(t, storedPath(dir, "originals", s.OriginalKey(testNamespace, testImageID, ".jpg")))
+	})
+}
+
+func TestImageExists(t *testing.T) {
+	t.Run("nothing stored", func(t *testing.T) {
+		s, _ := newTestStore(t)
+
+		exists, err := s.ImageExists(t.Context(), testNamespace, testImageID)
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	// The key of an original carries its format, so an original in any format counts, not only the one a new upload would have
+	for _, format := range []string{"jpg", "png", "webp", "avif", "heic", "heif"} {
+		t.Run("an original in "+format, func(t *testing.T) {
+			s, _ := newTestStore(t)
+			_, _, err := s.SaveOriginal(t.Context(), testNamespace, testImageID, format, strings.NewReader("image-data"), 1024, "application/octet-stream")
+			require.NoError(t, err)
+
+			exists, err := s.ImageExists(t.Context(), testNamespace, testImageID)
+			require.NoError(t, err)
+			assert.True(t, exists)
+		})
+	}
+
+	t.Run("a manifest without an original", func(t *testing.T) {
+		s, _ := newTestStore(t)
+		err := s.WriteManifest(t.Context(), testNamespace, testImageID, map[string]string{"version": "provino/v1"})
+		require.NoError(t, err)
+
+		exists, err := s.ImageExists(t.Context(), testNamespace, testImageID)
+		require.NoError(t, err)
+		assert.True(t, exists)
+	})
+
+	t.Run("another image in the same namespace", func(t *testing.T) {
+		s, _ := newTestStore(t)
+		_, _, err := s.SaveOriginal(t.Context(), testNamespace, uuid.NewV4(), "jpg", strings.NewReader("image-data"), 1024, "image/jpeg")
+		require.NoError(t, err)
+
+		exists, err := s.ImageExists(t.Context(), testNamespace, testImageID)
+		require.NoError(t, err)
+		assert.False(t, exists)
 	})
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 	"github.com/italypaleale/provino/internal/config"
 	"github.com/italypaleale/provino/internal/signing"
+	"github.com/italypaleale/provino/internal/sniff"
 	"github.com/italypaleale/provino/variant"
 	"github.com/italypaleale/provino/webhook"
 )
@@ -173,13 +174,18 @@ func (a *httpAuthorizer) Authorize(ctx context.Context, req Request) (Decision, 
 	defer res.Body.Close() //nolint:errcheck
 
 	// A refusal is the authorizer's answer about this caller, so it's reported as one rather than as a failure to reach it
-	if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusNotFound {
+	// Only a 403 refuses: a 404 is what a mistyped URL gets, and reading it as a refusal would turn a misconfiguration into every caller being refused with nothing in the logs
+	if res.StatusCode == http.StatusForbidden {
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxResponseSize))
 		return Decision{}, ErrRefused
 	}
 	if res.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
-		return Decision{}, fmt.Errorf("the authorizer answered %s: %s", res.Status, strings.TrimSpace(string(detail)))
+		hint := ""
+		if res.StatusCode == http.StatusNotFound {
+			hint = " (check that 'authorizer.http.url' names the authorizer's path)"
+		}
+		return Decision{}, fmt.Errorf("the authorizer answered %s%s: %s", res.Status, hint, strings.TrimSpace(string(detail)))
 	}
 
 	// Reading one byte past the limit is what tells an answer that's exactly at the limit apart from one that's over it
@@ -231,12 +237,9 @@ func validate(response webhook.AuthorizeResponse, images config.ConfigImages) (D
 		decision.AllowedFormats = slices.Clone(config.SourceFormats)
 	} else {
 		for _, format := range response.AllowedFormats {
-			format = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), "."))
-			if format == "jpeg" {
-				format = "jpg"
-			}
-			if slices.Contains(config.SourceFormats, format) && !slices.Contains(decision.AllowedFormats, format) {
-				decision.AllowedFormats = append(decision.AllowedFormats, format)
+			normalized, ok := sniff.NormalizeFormat(format)
+			if ok && !slices.Contains(decision.AllowedFormats, normalized) {
+				decision.AllowedFormats = append(decision.AllowedFormats, normalized)
 			}
 		}
 		if len(decision.AllowedFormats) == 0 {

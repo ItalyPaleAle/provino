@@ -158,6 +158,25 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})
 
+	t.Run("variants that come out as one file with different settings are rejected", func(t *testing.T) {
+		shared := req
+		shared.Variants = []VariantSpec{
+			{Name: "600x600.webp", Format: imaging.FormatWebP, Quality: 90, Effort: 5, Resolution: imaging.Resolution{Width: 600, Height: 600}, Fit: imaging.FitContain},
+			{Name: "600xauto.webp", Format: imaging.FormatWebP, Quality: 20, Effort: 5, Resolution: imaging.Resolution{Width: 600}, Fit: imaging.FitContain},
+		}
+		conflicting := []VariantResult{
+			{Index: 0, Done: true, Width: 600, Height: 400, Size: 3000, CompletedAt: now},
+			{Index: 1, Done: true, Width: 600, Height: 400, Size: 1000, CompletedAt: now},
+		}
+		_, err := buildManifest(imagekeys.New(), shared, snap, imaging.Resolution{Width: 1500, Height: 1000}, conflicting)
+		require.ErrorContains(t, err, "both come out as the 600x400.webp file")
+
+		// The same file with the same settings is one variant listed twice, which is fine
+		shared.Variants[1].Quality = 90
+		_, err = buildManifest(imagekeys.New(), shared, snap, imaging.Resolution{Width: 1500, Height: 1000}, conflicting)
+		require.NoError(t, err)
+	})
+
 	t.Run("a skip pointing outside the job is rejected", func(t *testing.T) {
 		broken := []VariantResult{results[0], {Index: 1, Done: true, Skipped: &SkippedVariant{Index: 7}}}
 		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)

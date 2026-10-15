@@ -52,20 +52,21 @@ server:
     ## Description:
     ##   Path where to load TLS certificates from
     ##   Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificates when they're updated.
-    ##   If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located.
+    ##   If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located, when both files are there.
+    ##   Startup fails when a folder named here doesn't contain both files, or when either folder contains only one of them.
     ## Default: the same folder as the `config.yaml` file
     #path: the same folder as the `config.yaml` file
 
     ## server.tls.certPEM (string)
     ## Description:
     ##   Full, PEM-encoded TLS certificate
-    ##   Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`.
+    ##   Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`, and the two must be set together.
     #certPEM: ""
 
     ## server.tls.keyPEM (string)
     ## Description:
     ##   Full, PEM-encoded TLS key
-    ##   Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`.
+    ##   Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`, and the two must be set together.
     #keyPEM: ""
 
 auth:
@@ -252,7 +253,7 @@ authorizer:
 
     ## authorizer.static.allowedFormats (list of strings)
     ## Description:
-    ##   Source formats uploads may be in: `jpg`, `png`, `webp`, `avif`, `heic`, `heif`
+    ##   Source formats uploads may be in: `jpg` (or `jpeg`), `png`, `webp`, `avif`, `heic`, `heif`
     ##   If empty, every supported format is allowed
     #allowedFormats: []
 
@@ -509,7 +510,7 @@ logs:
 
   ## logs.omitHealthChecks (boolean)
   ## Description:
-  ##   If true, calls to the healthcheck endpoint (`/healthz`) are not included in the logs
+  ##   If true, calls to the health check endpoints (`/healthz` and `/readyz`) are not included in the logs
   ## Default: true
   #omitHealthChecks: true
 

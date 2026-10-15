@@ -1,13 +1,18 @@
 # This is an allowlist: everything is excluded and the paths the Dockerfile reads are added back, so a new folder at the root never silently joins the build context
 *
 
+# A package missing here fails the build, which the image job in CI catches on every pull request
 !go.mod
 !go.sum
 !api
+!client
 !cmd
 !imagekeys
 !imagesize
 !internal
+!manifest
+!variant
+!webhook
 
 # Tests are not part of the binary
 **/*_test.go

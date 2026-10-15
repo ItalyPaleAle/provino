@@ -107,8 +107,8 @@ spec:
         # The root file system is read-only, and two things need somewhere to write: an object store reached over HTTP spools each upload to a temporary file before sending it, and every job caches the source image its variants are encoded from
         - name: tmp
           mountPath: /tmp
-      # Both probes call the health endpoint with the `curl` the image carries for its own HEALTHCHECK
-      # The startup probe is what gives the first run room to migrate the actor database before the liveness probe starts counting failures
+      # Both probes call a health endpoint with the `curl` the image carries for its own HEALTHCHECK
+      # The startup probe calls /readyz, which answers once the actor host has registered, so it's what gives the first run room to migrate the actor database before the liveness probe starts counting failures
       startupProbe:
         exec:
           command:
@@ -117,7 +117,7 @@ spec:
             - --silent
             - --max-time
             - "3"
-            - http://127.0.0.1:3000/healthz
+            - http://127.0.0.1:3000/readyz
         periodSeconds: 2
         failureThreshold: 30
       livenessProbe:

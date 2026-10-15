@@ -6,10 +6,25 @@ package sniff
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
+	"strings"
 )
 
 // Formats are the source formats provino accepts, by the extension the original is stored with
 var Formats = []string{"jpg", "png", "webp", "avif", "heic", "heif"}
+
+// NormalizeFormat returns the name a source format is stored under, accepting it the way people write it: in any case, with a leading dot, and "jpeg" for "jpg"
+// The second result is false for a format that isn't one of Formats
+func NormalizeFormat(format string) (string, bool) {
+	format = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), "."))
+	if format == "jpeg" {
+		format = "jpg"
+	}
+	if !slices.Contains(Formats, format) {
+		return "", false
+	}
+	return format, true
+}
 
 // HeaderSize is how many leading bytes Detect needs to see
 // It's enough for every signature, including the brand list of an ISO media file

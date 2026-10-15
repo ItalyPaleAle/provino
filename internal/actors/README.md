@@ -8,20 +8,24 @@ Francis owns the actors, the workflow journal, retries, deadlines, retention and
 
 The jobs of one image run one at a time, in the order they were queued, so two jobs never write the same manifest at once. The `provino-image` actor, addressed as `<namespace>:<imageId>`, holds the queue. Francis forbids `/` in actor IDs, and a namespace can't contain `:`, so the two parts never run into each other.
 
-Its state is the active job, the jobs waiting behind it (each with its full `JobRequest`), and a short history of finished jobs. It has three methods and an alarm:
+Its state is the active job, the jobs waiting behind it (each with its full `JobRequest`), a short history of finished jobs, and the claim of an upload that is storing the image. It has five methods and an alarm:
 
 | Method | What it does |
 | --- | --- |
 | `enqueue` | Refuses a job when `images.maxQueuedJobs` are already waiting. Otherwise it mints a UUIDv7 job ID, appends the job, and starts it right away when nothing is active. It returns the job ID and its `position: 0` when it started, its place in the queue otherwise. A job whose workflow can't be started isn't accepted, so the caller finds out at once |
 | `finished` | Called by the workflow when it ends, it moves the active job to the history and starts the next one. A call about a job that isn't active is a repeat, and changes nothing |
+| `claim` | Holds the image's ID for an upload that named it, until the upload releases it or the claim expires (`server.readTimeout` plus a minute). It refuses when another upload holds the ID, or when a job of the image is active or queued. The upload checks that nothing is stored for the ID only once it holds the claim, which is what keeps two uploads of the same ID from both passing that check |
+| `release` | Gives up the claim an upload holds, once its job is queued or the upload failed. A release from an upload that doesn't hold the claim changes nothing |
 | `job` | A read-only peek, which reports whether a job is active, queued (with its position) or recently finished, along with the hash of the subject that started it |
-| The `check` alarm | The safety net. It fires after the active job's deadline, after a failed start, and when the oldest history entry expires |
+| The `check` alarm | The safety net. While a job is active it fires every minute, and at the latest after the job's deadline. It also fires after a failed start, when a claim expires, and when the oldest history entry expires |
 
-The actor records a job as active before starting its workflow. If the process dies in between, the actor is left holding an active job whose workflow doesn't exist, and `heal` frees it: every `enqueue` and every alarm reads the active job's journal, and moves on when the workflow has ended or doesn't exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
+The actor schedules its alarm, then records a job as active along with its request, and only then starts its workflow. If the process dies before the start, the actor is left holding an active job whose workflow doesn't exist, and the alarm is already there to find it. `heal` runs on every `enqueue`, `claim` and alarm, and reads the active job's journal. It moves on when the workflow has ended. When the workflow doesn't exist and its journal can't have been purged yet (less than `actors.completedWorkflowRetention` has passed since the job became active), the workflow was never started, so `heal` starts it from the kept request; a start that did happen after all is found by its job ID and discarded. Otherwise the job is freed. The request is dropped from the state once the workflow is known to exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
+
+Polling the active job every minute is what bounds a lost release: if the workflow's `release` step gives up, the next job waits for the next check rather than for the job's deadline.
 
 The actor holds the queue itself, rather than starting every job as a workflow parked on a `WaitForEvent` step, for two reasons. Francis counts a workflow's waiting time against its deadline. And `RaiseEvent` records nothing when it arrives before the wait step is open, while its idempotency key makes raising it again unreliable, so a "your turn" event could be lost.
 
-The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, queued or remembered deletes its state, so the actors of every image ever uploaded don't accumulate.
+The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, queued, remembered or claimed deletes its state, so the actors of every image ever uploaded don't accumulate.
 
 ## Workflow definition
 
@@ -55,7 +59,7 @@ flowchart LR
 | `manifest` | Required step, compensated also when it fails | Builds the `provino/v1` manifest from the durable outputs, with the full object key of every file, and writes it. A job without variants writes nothing, because the upload already stored the manifest, and returns the manifest it found. This step is the workflow's output. |
 | `notify` | Optional step | Delivers `image.stored` (no variants) or `image.optimized` to the endpoint the job resolved when it was queued. Exhausted retries are recorded by Francis and don't fail the job. |
 | `cleanup` | Step that can't fail | Removes this host's cached source and records the outcome metric. |
-| `release` | Optional step | Tells the image's queue the job is done. If it can't, the actor's alarm notices on its own. |
+| `release` | Optional step | Tells the image's queue the job is done. If it can't, the actor's alarm notices on its own, within a minute. |
 
 Every step after `manifest` is optional or can't fail, so a job whose variants are stored never unwinds them because a notification or a local cleanup went wrong.
 
@@ -72,6 +76,15 @@ The manifest's timestamps come only from durable values. `StartedAt` comes from 
 No variant is larger than its source. A box the source can't fill gets the source's own pixels: the whole source with `contain`, or with `cover` the largest centered crop of the box's shape, which `imaging.FullResolution` computes. Every such box of one fit and format produces the same file, so `prepare` keeps only the tightest, by `imaging.ScaleFactor`, and skips the others. The encoder enforces the same rule on its own.
 
 A stored file larger than its source was enlarged before this rule existed, so it's never reused. A box the source can't fill may also reuse a stored file of another box when that file has the same fit, format and full-resolution size.
+
+## Variants that come out as one file
+
+A variant is stored under its actual size and format, so two boxes that differ can come out as the same file for a given source: for a 3:2 source, a `600x600` box and a box `600` pixels wide both come out at `600x400`. Only one encoding of that file can be stored, so the variants that share it have to agree on their encoder settings:
+
+- `prepare` hands every item that encodes the list of stored files the job reuses. An encode that comes out as one of them doesn't replace it: with the same quality and effort it reports that file as its own, and with different ones it fails the job permanently. The reused file stays exactly as the manifest the job found describes it, which matters because a failed job puts that manifest back.
+- `manifest` fails the job permanently when two entries that own the same file differ in quality or effort, which is what two fresh encodes of one file with different settings lead to. The failure names both variants.
+
+Variants that share a file with the same settings are fine, and the manifest lists both with the same key.
 
 ## Idempotency
 

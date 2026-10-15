@@ -100,7 +100,8 @@ The OpenAPI document is served at `/.openapi`, and as `/.openapi/provino.json` a
 | `POST /v1/client/optimize` | Backends | Generate variants for an existing image |
 | `GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}` | Backends | The status of any job |
 | `GET /.well-known/provino-keys.json` | Webhook receivers | The Ed25519 keys provino signs with |
-| `GET /healthz` | Health checks | Liveness |
+| `GET /healthz` | Health checks | Liveness: the process answers |
+| `GET /readyz` | Health checks | Readiness: the actor host is registered and jobs can run |
 
 Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job is queued.
 

@@ -12,7 +12,7 @@ The image is distroless and runs as a non-root user. libvips and its codecs are 
 
 The service reads its configuration from `PROVINO_CONFIG` if it's set, otherwise from `config.yaml` in the working directory, then `~/.provino/`, then `/etc/provino/`. Unknown keys are rejected, so a stale option fails startup with a message naming it.
 
-The image declares a `HEALTHCHECK` that runs `curl` against `/healthz` on port 3000, the default of `server.port`. Running on another port means overriding the check along with the port:
+The service answers `/healthz` as soon as its process does, and `/readyz` once its actor host has registered and it can run jobs, which is what a readiness probe should check. The image declares a `HEALTHCHECK` that runs `curl` against `/healthz` on port 3000, the default of `server.port`. Running on another port means overriding the check along with the port:
 
 ```sh
 docker run -p 8080:8080 \

@@ -61,6 +61,32 @@ jobs:
         run: |
           make test-workflows
 
+  # The release workflow is the only other place the image is built, so this catches a broken Dockerfile or build context before it reaches main
+  image:
+    name: Container image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Only the native architecture is built, since the build context and the Dockerfile are the same for both
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   chart:
     name: Helm chart
     runs-on: ubuntu-26.04

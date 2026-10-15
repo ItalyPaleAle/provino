@@ -129,16 +129,17 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- if .Values.startupProbe.enabled }}
+          {{- /* /readyz answers once the actor host has registered, which is after the first start has migrated the actor database */}}
           startupProbe:
-            {{- include "provino.probe" (dict "context" . "probe" .Values.startupProbe) | nindent 12 }}
+            {{- include "provino.probe" (dict "context" . "probe" .Values.startupProbe "path" "/readyz") | nindent 12 }}
           {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           livenessProbe:
-            {{- include "provino.probe" (dict "context" . "probe" .Values.livenessProbe) | nindent 12 }}
+            {{- include "provino.probe" (dict "context" . "probe" .Values.livenessProbe "path" "/healthz") | nindent 12 }}
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
           readinessProbe:
-            {{- include "provino.probe" (dict "context" . "probe" .Values.readinessProbe "successThreshold" true) | nindent 12 }}
+            {{- include "provino.probe" (dict "context" . "probe" .Values.readinessProbe "path" "/readyz" "successThreshold" true) | nindent 12 }}
           {{- end }}
           {{- with .Values.resources }}
           resources:

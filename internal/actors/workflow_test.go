@@ -19,6 +19,7 @@ import (
 	"uuid"
 
 	"github.com/davidbyttow/govips/v2/vips"
+	"github.com/italypaleale/francis/actor"
 	francisworkflow "github.com/italypaleale/francis/builtin/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -283,6 +284,25 @@ func TestStoredVariantsLookupFindsTheFullResolutionFileOfAnotherBox(t *testing.T
 	// Another format is another file
 	_, found = stored.lookup(source, VariantSpec{Format: imaging.FormatAVIF, Resolution: imaging.Resolution{Width: 1300, Height: 1300}, Fit: imaging.FitContain})
 	assert.False(t, found)
+}
+
+func TestImageActorNextCheck(t *testing.T) {
+	a := &imageActor{runtime: &Runtime{WorkflowTimeout: 10 * time.Minute, CompletedWorkflowRetention: 24 * time.Hour}}
+	now := time.Now()
+
+	// A running job is looked at every minute rather than only after its hour-long deadline, so a lost release doesn't hold the queue that long
+	due := a.nextCheck(&imageState{Active: &activeJob{StartedAt: now}}, now)
+	assert.Equal(t, now.Add(activePollInterval), due)
+
+	// Close to its deadline, the deadline comes first
+	startedAt := now.Add(-jobDeadline(a.runtime.WorkflowTimeout))
+	due = a.nextCheck(&imageState{Active: &activeJob{StartedAt: startedAt}}, now)
+	assert.Equal(t, startedAt.Add(jobDeadline(a.runtime.WorkflowTimeout)+activeCheckMargin), due)
+
+	// A claim is cleared once it expires
+	expiresAt := now.Add(10 * time.Second)
+	due = a.nextCheck(&imageState{Upload: &uploadClaim{Token: "t", ExpiresAt: expiresAt}}, now)
+	assert.Equal(t, expiresAt, due)
 }
 
 func TestFailureMessage(t *testing.T) {
@@ -670,6 +690,40 @@ func TestJobFailureRestoresTheImage(t *testing.T) {
 	assert.JSONEq(t, string(before), string(after))
 }
 
+// The failure event is dated when the job failed rather than when it was requested, and keeps that date when its delivery is retried
+func TestJobFailureEventIsDatedWhenTheJobFailed(t *testing.T) {
+	var attempts atomic.Int32
+	timestamps := make(chan time.Time, 4)
+	receiver := newTestReceiver(t, func(w http.ResponseWriter, event webhook.Event) {
+		timestamps <- event.Timestamp
+		// The first attempt is refused, so the event is delivered again
+		if attempts.Add(1) == 1 {
+			http.Error(w, "try again", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	host := startTestHost(t, testHostOptions{webhookURL: receiver.URL})
+
+	imageID := uuid.NewV4()
+	requestedAt := time.Now().Add(-time.Hour)
+	start := time.Now()
+	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), SourceFormat: "jpg", RequestedAt: requestedAt, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	host.waitForJob(t, imageID, jobID, StatusFailed)
+
+	var received []time.Time
+	for range 2 {
+		select {
+		case ts := <-timestamps:
+			received = append(received, ts)
+		case <-time.After(workflowWaitTimeout):
+			t.Fatal("the failure event was not delivered twice")
+		}
+	}
+	assert.True(t, received[0].Equal(received[1]), "the timestamp changed across attempts: %s, %s", received[0], received[1])
+	assert.False(t, received[0].Before(start.Truncate(time.Second)), "the event is dated %s, before the job ran", received[0])
+}
+
 // A job for an image that doesn't exist fails before it writes anything, and says why
 func TestJobForAMissingOriginalFails(t *testing.T) {
 	receiver := newTestReceiver(t, nil)
@@ -806,6 +860,30 @@ func TestImageActorFreesAStaleActiveJob(t *testing.T) {
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 }
 
+// A process that stops after recording a job as active and before starting its workflow leaves the alarm scheduled first, which starts the job rather than dropping it
+func TestImageActorStartsAnActiveJobThatNeverStarted(t *testing.T) {
+	host := startTestHost(t, testHostOptions{})
+
+	imageID := uuid.NewV4()
+	source := host.upload(t, imageID, 800, 600)
+	jobID := uuid.NewV7().String()
+	request := JobRequest{JobID: jobID, Namespace: testNamespace, ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, RequestedAt: time.Now()}
+
+	// This is what the actor writes before it starts a workflow: the alarm first, then the active job with its request
+	actorID := imageActorID(testNamespace, imageID.String())
+	err := host.host.SetAlarm(t.Context(), imageActorType, actorID, alarmCheck, actor.AlarmProperties{DueTime: time.Now()})
+	require.NoError(t, err)
+	err = host.host.SetState(t.Context(), imageActorType, actorID, imageState{
+		Active: &activeJob{JobID: jobID, StartedAt: time.Now(), Request: &request},
+	}, nil)
+	require.NoError(t, err)
+
+	// Until the alarm fires, the job reads as running, and then it runs for real
+	host.waitForJob(t, imageID, jobID, StatusCompleted)
+	m := host.manifest(t, imageID)
+	assert.Equal(t, jobID, m.JobID)
+}
+
 func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *testing.T) {
 	host := startTestHost(t, testHostOptions{})
 
@@ -901,6 +979,154 @@ func TestRegenerationReplacesEnlargedFiles(t *testing.T) {
 	assert.Equal(t, 800, m.Variants[0].Width)
 	assert.NotEqual(t, int64(len("enlarged")), m.Variants[0].Size, "the enlarged file must not be reused")
 	assert.True(t, m.Variants[1].Skipped)
+}
+
+// Change the quality of a variant
+func withQuality(spec VariantSpec, quality int) VariantSpec {
+	spec.Quality = quality
+	return spec
+}
+
+// Boxes that differ can come out at the same size for one source, and then only one encoding of that file can be stored
+func TestVariantsThatComeOutAsOneFile(t *testing.T) {
+	host := startTestHost(t, testHostOptions{})
+
+	t.Run("different settings fail the job and leave nothing behind", func(t *testing.T) {
+		imageID := uuid.NewV4()
+		source := host.upload(t, imageID, 1500, 1000)
+
+		// For a 3:2 source, a 600x600 box and a box 600 pixels wide both come out at 600x400
+		jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{
+			withQuality(webpSpec("600x600.webp", 600, 600), 90),
+			withQuality(webpSpec("600xauto.webp", 600, 0), 20),
+		}})
+		status := host.waitForJob(t, imageID, jobID, StatusFailed)
+		assert.Contains(t, status.Error, "give them the same quality and effort")
+
+		// The manifest the upload wrote is still there, and the file the job stored was removed
+		m := host.manifest(t, imageID)
+		assert.Equal(t, manifest.StatusStored, m.Status)
+		_, err := host.store.ReadVariant(t.Context(), testNamespace, imageID, 600, 400, "webp")
+		require.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("a file another variant reuses is never replaced with different settings", func(t *testing.T) {
+		imageID := uuid.NewV4()
+		source := host.upload(t, imageID, 1500, 1000)
+		first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
+		host.waitForJob(t, imageID, first, StatusCompleted)
+		stored, err := host.store.ReadVariant(t.Context(), testNamespace, imageID, 600, 400, "webp")
+		require.NoError(t, err)
+
+		// The first variant reuses the stored file, so the second one can't be stored over it at another quality
+		second := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
+			withQuality(webpSpec("600x600.webp", 600, 600), 90),
+			withQuality(webpSpec("600xauto.webp", 600, 0), 20),
+		}})
+		status := host.waitForJob(t, imageID, second, StatusFailed)
+		assert.Contains(t, status.Error, "reuses as stored with quality 90")
+
+		// The stored file and the manifest describing it are what the first job left
+		after, err := host.store.ReadVariant(t.Context(), testNamespace, imageID, 600, 400, "webp")
+		require.NoError(t, err)
+		assert.Equal(t, stored, after)
+		m := host.manifest(t, imageID)
+		assert.Equal(t, first, m.JobID)
+	})
+
+	t.Run("the same settings share the file", func(t *testing.T) {
+		imageID := uuid.NewV4()
+		source := host.upload(t, imageID, 1500, 1000)
+		first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
+		host.waitForJob(t, imageID, first, StatusCompleted)
+		initial := host.manifest(t, imageID)
+
+		second := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
+			withQuality(webpSpec("600x600.webp", 600, 600), 90),
+			withQuality(webpSpec("600xauto.webp", 600, 0), 90),
+		}})
+		host.waitForJob(t, imageID, second, StatusCompleted)
+
+		// Both entries describe the stored file, which the second variant kept rather than encoded again
+		m := host.manifest(t, imageID)
+		require.Len(t, m.Variants, 2)
+		assert.Equal(t, m.Variants[0].Key, m.Variants[1].Key)
+		assert.Equal(t, initial.Variants[0].Size, m.Variants[0].Size)
+		assert.Equal(t, initial.Variants[0].Size, m.Variants[1].Size)
+	})
+}
+
+// An upload that names an image ID holds it while it stores the image, so a second upload of the same ID can't store it at the same time
+func TestImageIDClaims(t *testing.T) {
+	host := startTestHost(t, testHostOptions{})
+	jobs := host.Jobs()
+	ctx := t.Context()
+
+	claim := func(t *testing.T, imageID uuid.UUID, token string, ttl time.Duration) bool {
+		t.Helper()
+		claimed, err := jobs.ClaimUpload(ctx, testNamespace, imageID.String(), token, ttl)
+		require.NoError(t, err)
+		return claimed
+	}
+	release := func(t *testing.T, imageID uuid.UUID, token string) {
+		t.Helper()
+		err := jobs.ReleaseUpload(ctx, testNamespace, imageID.String(), token)
+		require.NoError(t, err)
+	}
+
+	t.Run("one upload at a time", func(t *testing.T) {
+		imageID := uuid.NewV4()
+		require.True(t, claim(t, imageID, "first", time.Minute))
+		assert.False(t, claim(t, imageID, "second", time.Minute))
+
+		// The holder can claim again, and a release by another upload changes nothing
+		assert.True(t, claim(t, imageID, "first", time.Minute))
+		release(t, imageID, "second")
+		assert.False(t, claim(t, imageID, "second", time.Minute))
+
+		// Once released, the ID can be claimed again
+		release(t, imageID, "first")
+		assert.True(t, claim(t, imageID, "second", time.Minute))
+		release(t, imageID, "second")
+	})
+
+	t.Run("a claim that is never released expires", func(t *testing.T) {
+		imageID := uuid.NewV4()
+		require.True(t, claim(t, imageID, "abandoned", 50*time.Millisecond))
+		require.Eventually(t, func() bool {
+			return claim(t, imageID, "next", time.Minute)
+		}, 5*time.Second, 50*time.Millisecond)
+		release(t, imageID, "next")
+	})
+}
+
+// A job that is running or waiting means the image is in use, so an upload naming it is refused
+func TestImageIDClaimsWaitForTheImageJobs(t *testing.T) {
+	// The webhook holds the job open until the claim has been tried, so the job is still running when it arrives
+	unblock := make(chan struct{})
+	receiver := newTestReceiver(t, func(w http.ResponseWriter, _ webhook.Event) {
+		<-unblock
+		w.WriteHeader(http.StatusNoContent)
+	})
+	host := startTestHost(t, testHostOptions{webhookURL: receiver.URL})
+
+	imageID := uuid.NewV4()
+	source := host.upload(t, imageID, 400, 300)
+	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+
+	// Wait for the delivery, which the job makes after its manifest step
+	select {
+	case <-receiver.ids:
+	case <-time.After(workflowWaitTimeout):
+		t.Fatal("the job never delivered its event")
+	}
+
+	claimed, err := host.Jobs().ClaimUpload(t.Context(), testNamespace, imageID.String(), "upload", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+
+	close(unblock)
+	host.waitForJob(t, imageID, jobID, StatusCompleted)
 }
 
 func TestHostRateLimiter(t *testing.T) {

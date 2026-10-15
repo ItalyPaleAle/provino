@@ -251,6 +251,16 @@ func (w *jobWorkflowHandlers) prepare(ctx context.Context, task francisworkflow.
 		}
 	}
 
+	// Every encode learns which stored files the job keeps, so one that comes out at the same size and format can't replace a file another variant's manifest entry describes
+	reserved := reservedFiles(tasks)
+	if len(reserved) > 0 {
+		for i := range tasks {
+			if tasks[i].Skip == nil && tasks[i].Existing == nil {
+				tasks[i].Reserved = reserved
+			}
+		}
+	}
+
 	// A cache miss only costs another download, so prefetching never prevents the durable fan-out from starting
 	if needsSource {
 		err = w.runtime.SourceCache.Prefetch(ctx, namespace, imageID, snap.SourceFormat)
@@ -397,6 +407,23 @@ func planSkips(source imaging.Resolution, specs []VariantSpec) []*SkippedVariant
 		skips[i] = &SkippedVariant{Index: holder, For: specs[holder].Resolution}
 	}
 	return skips
+}
+
+// List the stored files the planned variants reuse, once each
+func reservedFiles(tasks []variantTask) []reservedFile {
+	var reserved []reservedFile
+	for _, task := range tasks {
+		if task.Existing == nil {
+			continue
+		}
+
+		// Two variants can reuse the same file, which only needs to be reserved once
+		_, found := variantTask{Reserved: reserved}.reservedAt(task.Existing.Width, task.Existing.Height, task.Existing.Format)
+		if !found {
+			reserved = append(reserved, reservedFile{Name: task.Spec.Name, Stored: *task.Existing})
+		}
+	}
+	return reserved
 }
 
 // Build and store the manifest from the fan-out's durable outputs
@@ -582,7 +609,7 @@ func (w *jobWorkflowHandlers) cleanupCompleted(ctx context.Context, task francis
 
 	w.removeSource(ctx, req.JobID, namespace, imageID)
 	if w.runtime.Metrics != nil {
-		w.runtime.Metrics.RecordJobCompleted(ctx, namespace, string(StatusCompleted))
+		w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusCompleted))
 	}
 	w.runtime.Log.InfoContext(ctx, "Job completed",
 		slog.String("jobId", req.JobID),
@@ -598,7 +625,7 @@ func (w *jobWorkflowHandlers) release(ctx context.Context, task francisworkflow.
 		return nil, err
 	}
 
-	err = w.releaseQueue(ctx, req)
+	_, err = w.releaseQueue(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -606,16 +633,24 @@ func (w *jobWorkflowHandlers) release(ctx context.Context, task francisworkflow.
 }
 
 // Invoke the image actor's finished method, which ignores a job that isn't the active one, so a repeat is harmless
-func (w *jobWorkflowHandlers) releaseQueue(ctx context.Context, req JobRequest) error {
+// It returns when the actor recorded the job as finished, which is the same on every call, or zero when that isn't known
+func (w *jobWorkflowHandlers) releaseQueue(ctx context.Context, req JobRequest) (time.Time, error) {
 	if w.runtime.Service == nil {
-		return nil
+		return time.Time{}, nil
 	}
 
-	_, err := w.runtime.Service.Invoke(ctx, imageActorType, imageActorID(req.Namespace, req.ImageID), methodFinished, finishedRequest{JobID: req.JobID})
+	res, err := w.runtime.Service.Invoke(ctx, imageActorType, imageActorID(req.Namespace, req.ImageID), methodFinished, finishedRequest{JobID: req.JobID})
 	if err != nil {
-		return fmt.Errorf("failed to release the image's queue: %w", err)
+		return time.Time{}, fmt.Errorf("failed to release the image's queue: %w", err)
 	}
-	return nil
+
+	// The time only dates the failure event, so an answer that can't be read doesn't fail the release
+	var result finishedResult
+	err = res.Decode(&result)
+	if err != nil {
+		return time.Time{}, nil //nolint:nilerr
+	}
+	return result.FinishedAt, nil
 }
 
 // Clean up when a job fails: free the queue, report the failure, and remove the local source
@@ -628,7 +663,7 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 	}
 
 	// The queue is freed first, so a failure event that can't be delivered doesn't hold up the image's next job
-	err = w.releaseQueue(ctx, req)
+	finishedAt, err := w.releaseQueue(ctx, req)
 	if err != nil {
 		w.runtime.Log.WarnContext(ctx, "Failed to release the queue of a failed job; the image actor will notice on its own", slog.String("jobId", req.JobID), slog.Any("error", err))
 	}
@@ -645,7 +680,17 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 			previous = w.parsePrevious(ctx, snap.Previous, namespace, imageID)
 		}
 
-		event := webhook.Event{Type: webhook.EventImageFailed, Timestamp: req.RequestedAt, Data: w.eventData(req, previous)}
+		// The event is dated when the image's queue recorded the failure, which the actor answers the same on every attempt
+		// Without that answer it falls back to the latest durable time the job has, so the timestamp still doesn't change across attempts
+		timestamp := finishedAt
+		if timestamp.IsZero() {
+			timestamp = snap.StartedAt
+		}
+		if timestamp.IsZero() {
+			timestamp = req.RequestedAt
+		}
+
+		event := webhook.Event{Type: webhook.EventImageFailed, Timestamp: timestamp, Data: w.eventData(req, previous)}
 		event.Data.Error = cause
 		err = w.deliver(ctx, req, event)
 		if err != nil {
@@ -658,7 +703,7 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 	}
 
 	if w.runtime.Metrics != nil {
-		w.runtime.Metrics.RecordJobCompleted(ctx, namespace, string(StatusFailed))
+		w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusFailed))
 	}
 	w.runtime.Log.InfoContext(ctx, "Job failed",
 		slog.String("jobId", req.JobID),
@@ -809,7 +854,34 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 		}
 	}
 
+	// Boxes that differ can still come out at the same size for a given source, and then their variants are one file that only one encoding can be stored as
+	err = checkSharedFiles(m.Variants)
+	if err != nil {
+		return manifest.Manifest{}, err
+	}
+
 	return m, nil
+}
+
+// Check that the entries describing the same file agree on how it was encoded
+// A skipped entry repeats its holder's settings, so only the entries that own a file are compared
+func checkSharedFiles(variants []manifest.Variant) error {
+	owners := make(map[string]manifest.Variant, len(variants))
+	for _, entry := range variants {
+		if entry.Skipped {
+			continue
+		}
+
+		owner, found := owners[entry.Key]
+		if !found {
+			owners[entry.Key] = entry
+			continue
+		}
+		if owner.Quality != entry.Quality || owner.Effort != entry.Effort {
+			return fmt.Errorf("variants '%s' (quality %d, effort %d) and '%s' (quality %d, effort %d) both come out as the %dx%d%s file, which can only be stored with one set of encoder settings: give them the same quality and effort", owner.Name, owner.Quality, owner.Effort, entry.Name, entry.Quality, entry.Effort, entry.Width, entry.Height, entry.Format.Extension())
+		}
+	}
+	return nil
 }
 
 // Describe a reused file with the metadata of the encoding that stored it, under the name and box this job asked for

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
@@ -57,6 +58,12 @@ const EnvActorsAddress = "PROVINO_ACTORS_ADDRESS"
 
 // Name of the folder inside the system temporary directory the source images are cached in when 'storage.sourceCache' is not set
 const defaultSourceCacheDirName = "provino-sources"
+
+// Names of the files the TLS certificate and key are loaded from, inside 'server.tls.path'
+const (
+	tlsCertFileName = "tls-cert.pem"
+	tlsKeyFileName  = "tls-key.pem"
+)
 
 // Names of webhook endpoints and API keys, which appear in logs and in requests
 var nameRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -142,16 +149,17 @@ type ConfigServer struct {
 type ConfigServerTLS struct {
 	// Path where to load TLS certificates from
 	// Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificates when they're updated.
-	// If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located.
+	// If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located, when both files are there.
+	// Startup fails when a folder named here doesn't contain both files, or when either folder contains only one of them.
 	// +default the same folder as the `config.yaml` file
 	Path string `yaml:"path"`
 
 	// Full, PEM-encoded TLS certificate
-	// Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`.
+	// Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`, and the two must be set together.
 	CertPEM string `yaml:"certPEM"` //nolint:tagliatelle
 
 	// Full, PEM-encoded TLS key
-	// Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`.
+	// Using `certPEM` and `keyPEM` is an alternative method of passing TLS certificates than using `path`, and the two must be set together.
 	KeyPEM string `yaml:"keyPEM"` //nolint:tagliatelle
 }
 
@@ -274,7 +282,7 @@ type ConfigAuthorizerStatic struct {
 	// Maximum size of an upload in bytes, applied together with `images.maxUploadSize`
 	MaxBytes int64 `yaml:"maxBytes"`
 
-	// Source formats uploads may be in: `jpg`, `png`, `webp`, `avif`, `heic`, `heif`
+	// Source formats uploads may be in: `jpg` (or `jpeg`), `png`, `webp`, `avif`, `heic`, `heif`
 	// If empty, every supported format is allowed
 	AllowedFormats []string `yaml:"allowedFormats"`
 
@@ -550,7 +558,7 @@ type ConfigLogs struct {
 	// +default "info"
 	Level string `yaml:"level"`
 
-	// If true, calls to the healthcheck endpoint (`/healthz`) are not included in the logs
+	// If true, calls to the health check endpoints (`/healthz` and `/readyz`) are not included in the logs
 	// +default true
 	OmitHealthChecks bool `yaml:"omitHealthChecks"`
 
@@ -702,7 +710,65 @@ func (c *Config) validateServer() error {
 		return errors.New("configuration option 'server.writeTimeout' must be greater than zero")
 	}
 
-	return nil
+	return c.validateTLS()
+}
+
+// Validate the TLS options, so a server that was meant to serve TLS fails to start rather than quietly serving plain HTTP
+// The certificate itself is parsed when the server starts, which fails on a value that isn't one
+func (c *Config) validateTLS() error {
+	tlsCfg := c.Server.TLS
+
+	// PEM values take precedence over files, and one without the other can't make a certificate
+	hasCert := tlsCfg.CertPEM != ""
+	hasKey := tlsCfg.KeyPEM != ""
+	switch {
+	case hasCert != hasKey:
+		return errors.New("configuration options 'server.tls.certPEM' and 'server.tls.keyPEM' must be set together")
+	case hasCert:
+		return nil
+	}
+
+	// Without PEM values the certificate is read from a folder: the one configured, or the one the configuration file is in
+	dir := tlsCfg.Path
+	explicit := dir != ""
+	if !explicit {
+		if c.internal.configFileLoaded == "" {
+			return nil
+		}
+		dir = filepath.Dir(c.internal.configFileLoaded)
+	}
+
+	certFound, err := regularFileExists(filepath.Join(dir, tlsCertFileName))
+	if err != nil {
+		return fmt.Errorf("failed to look for the TLS certificate in '%s': %w", dir, err)
+	}
+	keyFound, err := regularFileExists(filepath.Join(dir, tlsKeyFileName))
+	if err != nil {
+		return fmt.Errorf("failed to look for the TLS key in '%s': %w", dir, err)
+	}
+
+	// Both files enable TLS, and neither leaves it off unless the folder was named explicitly, but one alone is a mistake either way
+	switch {
+	case certFound && keyFound:
+		return nil
+	case certFound || keyFound:
+		return fmt.Errorf("the folder '%s' contains only one of '%s' and '%s', which TLS needs both of", dir, tlsCertFileName, tlsKeyFileName)
+	case explicit:
+		return fmt.Errorf("configuration option 'server.tls.path' names '%s', which doesn't contain '%s' and '%s'", dir, tlsCertFileName, tlsKeyFileName)
+	default:
+		return nil
+	}
+}
+
+// Report whether a path is a regular file, telling a missing file apart from one that can't be inspected
+func regularFileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("failed to inspect '%s': %w", path, err)
+	}
+	return info.Mode().IsRegular(), nil
 }
 
 // Validate the "auth" section
@@ -979,10 +1045,13 @@ func (c *Config) validateAuthorizer() error {
 		if static.MaxBytes < 0 {
 			return errors.New("configuration option 'authorizer.static.maxBytes' must not be negative")
 		}
-		for _, format := range static.AllowedFormats {
-			if !slices.Contains(SourceFormats, strings.ToLower(format)) {
+		// Formats are accepted the way the HTTP authorizer accepts them, so "jpeg" and ".JPG" both mean "jpg"
+		for i, format := range static.AllowedFormats {
+			normalized, ok := sniff.NormalizeFormat(format)
+			if !ok {
 				return fmt.Errorf("configuration option 'authorizer.static.allowedFormats' contains '%s', which is not one of %s", format, strings.Join(SourceFormats, ", "))
 			}
+			static.AllowedFormats[i] = normalized
 		}
 		static.Variants, err = variant.NormalizeSet(static.Variants, c.Images.MaxResolution, c.Images.MaxVariants)
 		if err != nil {

@@ -109,4 +109,4 @@ Variants that drop out of the set stay in the store, because an application may 
 
 ## Originals and IDs
 
-An image ID is spent by its first upload: an upload whose ID is already stored is refused with `409 image_exists`. Originals are kept after their jobs complete, because every later optimize request reads them again.
+An image ID is spent by its first upload: an upload whose ID is already stored, in any format, is refused with `409 image_exists`. So is an upload of an ID that another upload is storing at the same time, or that a job is working on. Originals are kept after their jobs complete, because every later optimize request reads them again.

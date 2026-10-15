@@ -16,9 +16,13 @@ import (
 
 const prefix = "provino"
 
+// AppMetrics records the service's own metrics
+//
+// No metric is labelled by namespace or image, because a namespace is often a tenant or a site, and a label per tenant grows without bound
 type AppMetrics struct {
 	apiCall          api.Int64Counter
 	jobStarted       api.Int64Counter
+	jobVariants      api.Int64Histogram
 	jobCompleted     api.Int64Counter
 	variantGenerated api.Int64Counter
 	variantDuration  api.Float64Histogram
@@ -52,6 +56,15 @@ func NewAppMetrics(ctx context.Context) (m *AppMetrics, shutdownFn func(ctx cont
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create "+prefix+"_jobs_started meter: %w", err)
+	}
+
+	m.jobVariants, err = meter.Int64Histogram(
+		prefix+"_job_variants",
+		api.WithDescription("The number of variants each started job asks for"),
+		api.WithExplicitBucketBoundaries(0, 1, 2, 4, 8, 16, 32, 64),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create "+prefix+"_job_variants meter: %w", err)
 	}
 
 	m.jobCompleted, err = meter.Int64Counter(
@@ -95,29 +108,26 @@ func (m *AppMetrics) RecordAPICall(ctx context.Context, method string) {
 	)
 }
 
-// RecordJobStarted records a job whose workflow began executing, along with the namespace it belongs to and the number of variants it generates
-func (m *AppMetrics) RecordJobStarted(ctx context.Context, namespace string, variants int) {
+// RecordJobStarted records a job whose workflow began executing, and the number of variants it asks for
+// The count is a histogram rather than a label, so every possible count doesn't become a series of its own
+func (m *AppMetrics) RecordJobStarted(ctx context.Context, variants int) {
 	if m == nil {
 		return
 	}
 
-	m.jobStarted.Add(recordCtx(ctx), 1,
-		api.WithAttributeSet(attribute.NewSet(
-			attribute.String("namespace", namespace),
-			attribute.Int("variants", variants),
-		)),
-	)
+	recordContext := recordCtx(ctx)
+	m.jobStarted.Add(recordContext, 1)
+	m.jobVariants.Record(recordContext, int64(variants))
 }
 
 // RecordJobCompleted records a job that reached a terminal state
-func (m *AppMetrics) RecordJobCompleted(ctx context.Context, namespace string, status string) {
+func (m *AppMetrics) RecordJobCompleted(ctx context.Context, status string) {
 	if m == nil {
 		return
 	}
 
 	m.jobCompleted.Add(recordCtx(ctx), 1,
 		api.WithAttributeSet(attribute.NewSet(
-			attribute.String("namespace", namespace),
 			attribute.String("status", status),
 		)),
 	)

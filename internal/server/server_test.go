@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
@@ -54,6 +55,54 @@ type fakeJobs struct {
 	enqueued   []actors.JobRequest
 	enqueueErr error
 	statuses   map[string]fakeJobStatus
+	// Claims on image IDs by image, holding the token of the upload that holds each
+	claims map[string]string
+	// Every claim that was requested, granted or not
+	claimed int
+}
+
+func (f *fakeJobs) ClaimUpload(_ context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.claimed++
+	if ttl <= 0 {
+		return false, errors.New("the claim needs a positive TTL")
+	}
+	if f.claims == nil {
+		f.claims = map[string]string{}
+	}
+	key := namespace + "/" + imageID
+	_, held := f.claims[key]
+	if held {
+		return false, nil
+	}
+	f.claims[key] = token
+	return true, nil
+}
+
+func (f *fakeJobs) ReleaseUpload(_ context.Context, namespace string, imageID string, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := namespace + "/" + imageID
+	if f.claims[key] == token {
+		delete(f.claims, key)
+	}
+	return nil
+}
+
+// Report whether an upload holds a claim on an image, in any namespace
+func (f *fakeJobs) holdsClaim(imageID uuid.UUID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for key := range f.claims {
+		if strings.HasSuffix(key, "/"+imageID.String()) {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeJobStatus struct {
@@ -120,7 +169,9 @@ type testServerOptions struct {
 	noAuthorizer bool
 	// Ed25519 signing keys to publish
 	signingKeys *signing.KeySet
-	configure   func(c *config.Config)
+	// Closed once the service can run jobs
+	ready     <-chan struct{}
+	configure func(c *config.Config)
 }
 
 func newTestServer(t *testing.T, opts testServerOptions) *testServer {
@@ -179,6 +230,7 @@ func newTestServer(t *testing.T, opts testServerOptions) *testServer {
 		Authenticator: authenticators,
 		Notifier:      notifier,
 		SigningKeys:   opts.signingKeys,
+		Ready:         opts.ready,
 	}
 	if !opts.noAuthorizer {
 		serverOpts.Authorizer = ts.authz
@@ -285,6 +337,50 @@ func TestUnauthenticatedRoutes(t *testing.T) {
 	// Without signing keys there's nothing to publish
 	rec = ts.do(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/.well-known/provino-keys.json", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestReadyRoute(t *testing.T) {
+	ready := make(chan struct{})
+	ts := newTestServer(t, testServerOptions{ready: ready})
+	get := func(path string) int {
+		return ts.do(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)).Code
+	}
+
+	// Until the actor host is ready the service answers, but can't run jobs
+	assert.Equal(t, http.StatusNoContent, get("/healthz"))
+	assert.Equal(t, http.StatusServiceUnavailable, get("/readyz"))
+
+	close(ready)
+	assert.Equal(t, http.StatusNoContent, get("/readyz"))
+
+	// Without a readiness signal the service is always ready
+	ts = newTestServer(t, testServerOptions{})
+	assert.Equal(t, http.StatusNoContent, get("/readyz"))
+}
+
+func TestRunFailsWhenThePortIsTaken(t *testing.T) {
+	// Hold a port so the server can't listen on it
+	occupied, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close() //nolint:errcheck
+	port := occupied.Addr().(*net.TCPAddr).Port //nolint:forcetypeassert
+
+	ts := newTestServer(t, testServerOptions{configure: func(c *config.Config) {
+		c.Server.Bind = "127.0.0.1"
+		c.Server.Port = port
+	}})
+
+	// Run has to report the failure rather than block on a server that never started
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ts.Run(t.Context())
+	}()
+	select {
+	case err = <-errCh:
+		require.ErrorContains(t, err, "failed to start app server")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after failing to listen")
+	}
 }
 
 func TestJWKSRoute(t *testing.T) {
@@ -576,6 +672,74 @@ func TestClientUpload(t *testing.T) {
 		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 		assert.Empty(t, ts.jobs.last(t).Variants)
+
+		// A minted ID is new, so it isn't claimed
+		assert.Zero(t, ts.jobs.claimed)
+	})
+
+	t.Run("an image ID is spent by its first upload, whatever the format", func(t *testing.T) {
+		ts := newTestServer(t, testServerOptions{})
+		imageID := uuid.NewV4()
+		metadata := client.UploadMetadata{Namespace: "tenant-1", ImageID: imageID.String()}
+
+		body, contentType := uploadBody(t, metadata, pngImage(t, 10, 10))
+		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		// The claim is released once the job is queued
+		assert.False(t, ts.jobs.holdsClaim(imageID))
+
+		// The second upload is a JPEG, whose original would be stored under another key
+		img, err := vips.Black(10, 10)
+		require.NoError(t, err)
+		defer img.Close()
+		jpeg, _, err := img.ExportJpeg(vips.NewJpegExportParams())
+		require.NoError(t, err)
+		body, contentType = uploadBody(t, metadata, jpeg)
+		rec = ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "image_exists", errorCode(t, rec))
+		assert.Len(t, ts.jobs.enqueued, 1)
+		assert.False(t, ts.jobs.holdsClaim(imageID))
+
+		// Nothing of the second upload was stored
+		exists, err := ts.store.OriginalExists(t.Context(), "tenant-1", imageID, "jpg")
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("an image ID another upload is storing is refused", func(t *testing.T) {
+		ts := newTestServer(t, testServerOptions{})
+		imageID := uuid.NewV4()
+		ts.jobs.claims = map[string]string{"tenant-1/" + imageID.String(): "another-upload"}
+
+		body, contentType := uploadBody(t, client.UploadMetadata{Namespace: "tenant-1", ImageID: imageID.String()}, pngImage(t, 10, 10))
+		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "image_exists", errorCode(t, rec))
+		assert.Empty(t, ts.jobs.enqueued)
+
+		// The other upload's claim is left alone, and nothing was stored
+		assert.True(t, ts.jobs.holdsClaim(imageID))
+		exists, err := ts.store.ImageExists(t.Context(), "tenant-1", imageID)
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("a failed upload releases its claim", func(t *testing.T) {
+		ts := newTestServer(t, testServerOptions{})
+		ts.jobs.enqueueErr = errors.New("queue unavailable")
+		imageID := uuid.NewV4()
+
+		body, contentType := uploadBody(t, client.UploadMetadata{Namespace: "tenant-1", ImageID: imageID.String()}, pngImage(t, 10, 10))
+		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assert.Equal(t, 1, ts.jobs.claimed)
+		assert.False(t, ts.jobs.holdsClaim(imageID))
+
+		// The ID is usable again, since the failed upload removed what it wrote
+		exists, err := ts.store.ImageExists(t.Context(), "tenant-1", imageID)
+		require.NoError(t, err)
+		assert.False(t, exists)
 	})
 
 	failures := map[string]struct {

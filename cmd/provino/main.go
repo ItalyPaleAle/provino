@@ -204,6 +204,7 @@ func main() {
 		Authorizer:    uploadAuthorizer,
 		Notifier:      notifier,
 		SigningKeys:   signingKeys,
+		Ready:         actorHost.Ready(),
 	})
 	if err != nil {
 		shutdowns.Run(log)

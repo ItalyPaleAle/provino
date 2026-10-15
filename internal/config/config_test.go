@@ -75,6 +75,81 @@ func TestValidateDefaults(t *testing.T) {
 }
 
 // The cache is a local folder rather than a DSN, and an operator that names one keeps it
+func TestValidateTLS(t *testing.T) {
+	// Write the TLS files a folder holds; the contents are parsed when the server starts, not here
+	folder := func(t *testing.T, files ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, name := range files {
+			err := os.WriteFile(filepath.Join(dir, name), []byte("pem"), 0o600)
+			require.NoError(t, err)
+		}
+		return dir
+	}
+
+	t.Run("no TLS at all", func(t *testing.T) {
+		cfg := validConfigForTest()
+		cfg.SetLoadedConfigPath(filepath.Join(folder(t), "config.yaml"))
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	t.Run("both PEM values", func(t *testing.T) {
+		cfg := validConfigForTest()
+		cfg.Server.TLS.CertPEM = "cert"
+		cfg.Server.TLS.KeyPEM = "key"
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	t.Run("both files in the folder", func(t *testing.T) {
+		cfg := validConfigForTest()
+		cfg.Server.TLS.Path = folder(t, tlsCertFileName, tlsKeyFileName)
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	failures := map[string]struct {
+		configure func(cfg *Config)
+		message   string
+	}{
+		"a certificate PEM without its key": {
+			configure: func(cfg *Config) { cfg.Server.TLS.CertPEM = "cert" },
+			message:   "must be set together",
+		},
+		"a key PEM without its certificate": {
+			configure: func(cfg *Config) { cfg.Server.TLS.KeyPEM = "key" },
+			message:   "must be set together",
+		},
+		"a path without the files": {
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = folder(t) },
+			message:   "doesn't contain",
+		},
+		"a path that doesn't exist": {
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = filepath.Join(folder(t), "missing") },
+			message:   "doesn't contain",
+		},
+		"a path with only the certificate": {
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = folder(t, tlsCertFileName) },
+			message:   "contains only one of",
+		},
+		"only the key next to the configuration file": {
+			configure: func(cfg *Config) {
+				cfg.SetLoadedConfigPath(filepath.Join(folder(t, tlsKeyFileName), "config.yaml"))
+			},
+			message: "contains only one of",
+		},
+	}
+	for name, tt := range failures {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfigForTest()
+			tt.configure(cfg)
+			err := cfg.Validate(testLogger())
+			require.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
 func TestValidateSourceCache(t *testing.T) {
 	cfg := validConfigForTest()
 	cfg.Storage.SourceCache = "  /var/cache/provino  "
@@ -280,13 +355,15 @@ func TestValidateAuthorizer(t *testing.T) {
 		cfg.Notify.Endpoints = map[string]ConfigNotifyEndpoint{"app": hmacEndpoint()}
 		cfg.Authorizer = ConfigAuthorizer{Type: AuthorizerStatic, Static: ConfigAuthorizerStatic{
 			Namespace:      "default",
-			AllowedFormats: []string{"jpg", "PNG"},
+			AllowedFormats: []string{"jpeg", "PNG", ".heic"},
 			Variants:       []variant.Spec{{Format: "jpg", Quality: 80, Size: variant.Resolution{Width: 800}}},
 			Notify:         &ConfigNotifyTarget{},
 		}}
 
 		err := cfg.Validate(testLogger())
 		require.NoError(t, err)
+		// Formats are spelled the way they are stored, as the HTTP authorizer's answers are
+		assert.Equal(t, []string{"jpg", "png", "heic"}, cfg.Authorizer.Static.AllowedFormats)
 		assert.Equal(t, variant.FormatJPEG, cfg.Authorizer.Static.Variants[0].Format)
 		assert.Equal(t, variant.FitContain, cfg.Authorizer.Static.Variants[0].Fit)
 	})
