@@ -197,7 +197,8 @@ resources: {}
   #   cpu: 250m
   #   memory: 256Mi
 
-# Every probe requests /healthz on the API port
+# The liveness probe requests /healthz on the API port, which answers as long as the process does
+# The startup and readiness probes request /readyz, which answers once the actor host has registered and the replica can run jobs
 # The startup probe is what gives the first start room to migrate the actor database before the liveness probe starts counting failures
 livenessProbe:
   enabled: true

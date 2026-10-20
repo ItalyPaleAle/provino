@@ -56,6 +56,7 @@ type Server struct {
 	authorizer    authorizer.Authorizer
 	notifier      *notify.Notifier
 	jwks          []byte
+	ready         <-chan struct{}
 
 	// Method that forces a reload of TLS certificates from disk
 	tlsCertWatchFn tlsconfig.CertWatchFn
@@ -91,6 +92,8 @@ type NewServerOpts struct {
 	Notifier *notify.Notifier
 	// Ed25519 signing keys, published as JWKS; nil when none are configured
 	SigningKeys *signing.KeySet
+	// Closed once the service can run jobs, which is what /readyz reports; nil means it always can
+	Ready <-chan struct{}
 }
 
 // NewServer creates a new Server object and initializes it
@@ -125,6 +128,7 @@ func NewServer(opts NewServerOpts) (*Server, error) {
 		authenticator: opts.Authenticator,
 		authorizer:    opts.Authorizer,
 		notifier:      opts.Notifier,
+		ready:         opts.Ready,
 	}
 
 	// The key set doesn't change while the process runs, so it's encoded once
@@ -165,9 +169,11 @@ func (s *Server) initAppServer() (err error) {
 	mux := http.NewServeMux()
 
 	// Unauthenticated routes
+	// /healthz only says the process answers, while /readyz also says it can run jobs, so a load balancer holds requests back until then
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("GET /readyz", s.RouteReady)
 	mux.HandleFunc("GET /.openapi", provinoopenapi.ServeHTTP)
 	mux.HandleFunc("GET /.openapi/{document}", provinoopenapi.ServeHTTP)
 	mux.HandleFunc("GET /.well-known/provino-keys.json", s.RouteJWKS)
@@ -207,7 +213,7 @@ func (s *Server) initAppServer() (err error) {
 	if cfg.Logs.OmitHealthChecks {
 		filters = append(filters,
 			func(w sloghttp.WrapResponseWriter, r *http.Request) bool {
-				return r.URL.Path != "/healthz"
+				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 			},
 		)
 	}
@@ -226,6 +232,19 @@ func (s *Server) initAppServer() (err error) {
 	s.handler = httpserver.Use(mux, middlewares...)
 
 	return nil
+}
+
+// RouteReady answers 204 once the service can run jobs, which is when the actor host has registered with the actor runtime, and 503 until then
+func (s *Server) RouteReady(w http.ResponseWriter, r *http.Request) {
+	if s.ready != nil {
+		select {
+		case <-s.ready:
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // RouteJWKS serves the public keys of the Ed25519 keys this service signs with, so receivers can verify signatures and pick up rotated keys
@@ -261,13 +280,13 @@ func (s *Server) Run(ctx context.Context) error {
 	defer s.running.Store(false)
 	defer s.wg.Wait()
 
-	// App server
-	s.wg.Add(1)
+	// Start the app server before registering its shutdown, so a listener that couldn't be created returns its error instead of leaving the deferred wait blocked on a server that never started
 	appSrvErrCh := make(chan error, 1)
 	err := s.startAppServer(ctx, appSrvErrCh)
 	if err != nil {
 		return fmt.Errorf("failed to start app server: %w", err)
 	}
+	s.wg.Add(1)
 	defer func() {
 		// Handle graceful shutdown
 		defer s.wg.Done()

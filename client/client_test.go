@@ -138,6 +138,23 @@ func TestWaitForJobPollsUntilTheJobEnds(t *testing.T) {
 	assert.EqualValues(t, 3, calls.Load())
 }
 
+// An interval left unset polls at the default rather than panicking
+func TestWaitForJobWithoutAnInterval(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		state := JobRunning
+		if calls.Add(1) >= 2 {
+			state = JobFailed
+		}
+		respond(w, http.StatusOK, JobStatus{JobID: "job", Status: state})
+	})
+
+	status, err := c.WaitForJob(t.Context(), "tenant-1", "img", "job", 0)
+	require.NoError(t, err)
+	assert.Equal(t, JobFailed, status.Status)
+	assert.EqualValues(t, 2, calls.Load())
+}
+
 func TestTokenSourceCredentials(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer token-1", r.Header.Get("Authorization"))

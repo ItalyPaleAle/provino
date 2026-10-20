@@ -130,6 +130,27 @@ type variantTask struct {
 	Skip *SkippedVariant `json:"skip,omitempty"`
 	// SourceSize is the source's size after its EXIF orientation, which every item carries so the manifest can record it from durable outputs
 	SourceSize imaging.Resolution `json:"sourceSize,omitzero"`
+	// Reserved lists the stored files other variants of the job reuse, set on the items that encode
+	// An encode that comes out at the size and format of one of them must not replace it with different encoder settings, since the manifest describes the stored bytes
+	Reserved []reservedFile `json:"reserved,omitempty"`
+}
+
+// reservedFile is a stored file that a variant of the job reuses
+type reservedFile struct {
+	// Name of the variant that reuses the file
+	Name string `json:"name"`
+	// The file's entry in the manifest the job found
+	Stored manifest.Variant `json:"stored"`
+}
+
+// Find the reserved file an encode of the given size and format would be stored as
+func (t variantTask) reservedAt(width int, height int, format imaging.Format) (reservedFile, bool) {
+	for _, r := range t.Reserved {
+		if r.Stored.Width == width && r.Stored.Height == height && r.Stored.Format.Extension() == format.Extension() {
+			return r, true
+		}
+	}
+	return reservedFile{}, false
 }
 
 // SkippedVariant points a box the source can't fill at the variant of the same job that holds its pixels

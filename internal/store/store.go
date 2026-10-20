@@ -11,12 +11,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"sync"
 	"time"
 	"uuid"
 
 	"github.com/italypaleale/go-kit/objstore"
 
 	"github.com/italypaleale/provino/imagekeys"
+	"github.com/italypaleale/provino/internal/sniff"
 )
 
 const (
@@ -33,10 +36,6 @@ var (
 
 	// ErrNotFound is returned when an object key doesn't exist in the backend
 	ErrNotFound = objstore.ErrNotFound
-
-	// ErrAlreadyExists is returned when a source image is already stored for an image ID
-	// It is what makes an image ID good for one upload only: the image can only be created once
-	ErrAlreadyExists = errors.New("an image is already stored with this ID")
 )
 
 // Store is the pair of backends the service uses: one for the images it receives, one for the variants it generates
@@ -102,20 +101,10 @@ func (s *Store) ManifestKey(namespace string, imageID uuid.UUID) string {
 
 // SaveOriginal writes an image's source and returns the key it was written to
 //
-// The write only succeeds when nothing is stored for this image yet, which is what allows an image ID to be spent exactly once
-// Two requests arriving together both reach the store, and the one that gets there second is refused: the check is a read followed by a write rather than an atomic operation, so what makes it safe is that the loser is rejected rather than allowed to overwrite
+// A write replaces whatever is stored at the key, so a caller that must not overwrite an image checks ImageExists first, while holding the image's upload claim so no other upload can slip in between
 // Reading stops with ErrTooLarge as soon as more than maxSize bytes are read, so an oversized upload is never fully buffered or stored
 func (s *Store) SaveOriginal(ctx context.Context, namespace string, imageID uuid.UUID, format string, r io.Reader, maxSize int64, contentType string) (key string, size int64, err error) {
 	key = s.OriginalKey(namespace, imageID, format)
-
-	// A source that is already there means the ID was spent, so nothing is read from the request body at all
-	exists, err := s.originalExists(ctx, key)
-	if err != nil {
-		return "", 0, err
-	}
-	if exists {
-		return "", 0, ErrAlreadyExists
-	}
 
 	result, err := s.originals.Put(ctx, key, r, maxSize, contentType)
 	if err != nil {
@@ -135,6 +124,47 @@ func (s *Store) SaveOriginal(ctx context.Context, namespace string, imageID uuid
 // OriginalExists reports whether an image's source is stored
 func (s *Store) OriginalExists(ctx context.Context, namespace string, imageID uuid.UUID, format string) (bool, error) {
 	return s.originalExists(ctx, s.OriginalKey(namespace, imageID, format))
+}
+
+// ImageExists reports whether anything is stored for an image: its manifest, or an original in any of the source formats
+//
+// The key of an original carries its format, so looking only for the format of a new upload would let the same ID be stored again in another one
+// The lookups are metadata requests that run together, since on an object store each one is a round trip
+func (s *Store) ImageExists(ctx context.Context, namespace string, imageID uuid.UUID) (bool, error) {
+	lookups := make([]func() (bool, error), 0, len(sniff.Formats)+1)
+	lookups = append(lookups, func() (bool, error) {
+		key := s.ManifestKey(namespace, imageID)
+		exists, err := s.variants.Exists(ctx, key)
+		if err != nil {
+			return false, fmt.Errorf("failed to look up the manifest '%s': %w", key, err)
+		}
+		return exists, nil
+	})
+	for _, format := range sniff.Formats {
+		lookups = append(lookups, func() (bool, error) {
+			return s.OriginalExists(ctx, namespace, imageID, format)
+		})
+	}
+
+	found := make([]bool, len(lookups))
+	errs := make([]error, len(lookups))
+	var wg sync.WaitGroup
+	for i, lookup := range lookups {
+		wg.Go(func() {
+			found[i], errs[i] = lookup()
+		})
+	}
+	wg.Wait()
+
+	// Any object found answers the question, even when another lookup failed
+	if slices.Contains(found, true) {
+		return true, nil
+	}
+	err := errors.Join(errs...)
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // OpenOriginal opens an image's source for reading, and the caller owns the returned reader and must close it

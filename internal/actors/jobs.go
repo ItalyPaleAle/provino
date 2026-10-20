@@ -22,6 +22,11 @@ type Jobs interface {
 	// Status returns a job's status, and the hash of the subject that started it when that's still known
 	// The boolean is false when the image has no such job, or when its status has expired
 	Status(ctx context.Context, namespace string, imageID string, jobID string) (JobStatus, string, bool, error)
+	// ClaimUpload holds an image's ID for one upload that names it, identified by token, for at most ttl
+	// It returns false when another upload holds the ID, or when a job of the image is queued or running
+	ClaimUpload(ctx context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error)
+	// ReleaseUpload gives up the claim the upload identified by token holds, which does nothing when it holds none
+	ReleaseUpload(ctx context.Context, namespace string, imageID string, token string) error
 }
 
 // EnqueueResult is a job that was accepted
@@ -71,7 +76,7 @@ func (s *jobService) start(ctx context.Context, req JobRequest) error {
 		return fmt.Errorf("failed to start the workflow of job '%s': %w", req.JobID, err)
 	}
 	if created && s.runtime.Metrics != nil {
-		s.runtime.Metrics.RecordJobStarted(ctx, req.Namespace, len(req.Variants))
+		s.runtime.Metrics.RecordJobStarted(ctx, len(req.Variants))
 	}
 
 	return nil
@@ -132,6 +137,28 @@ func (h *hostJobs) Enqueue(ctx context.Context, req JobRequest) (EnqueueResult, 
 	}
 
 	return EnqueueResult{JobID: result.JobID, Position: result.Position}, nil
+}
+
+func (h *hostJobs) ClaimUpload(ctx context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error) {
+	res, err := h.service.Invoke(ctx, imageActorType, imageActorID(namespace, imageID), methodClaim, claimRequest{Token: token, TTL: ttl})
+	if err != nil {
+		return false, fmt.Errorf("failed to claim the image ID: %w", err)
+	}
+
+	var result claimResult
+	err = res.Decode(&result)
+	if err != nil {
+		return false, fmt.Errorf("failed to decode the claim: %w", err)
+	}
+	return result.Claimed, nil
+}
+
+func (h *hostJobs) ReleaseUpload(ctx context.Context, namespace string, imageID string, token string) error {
+	_, err := h.service.Invoke(ctx, imageActorType, imageActorID(namespace, imageID), methodRelease, claimRequest{Token: token})
+	if err != nil {
+		return fmt.Errorf("failed to release the image ID: %w", err)
+	}
+	return nil
 }
 
 func (h *hostJobs) Status(ctx context.Context, namespace string, imageID string, jobID string) (JobStatus, string, bool, error) {

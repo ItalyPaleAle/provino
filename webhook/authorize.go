@@ -11,8 +11,8 @@ const AuthorizeVersion = "provino/v1"
 
 // AuthorizeRequest is the body provino sends to the authorizer before it accepts a browser upload
 //
-// The authorizer answers 200 with an AuthorizeResponse to allow the upload, or 403 or 404 to refuse it
-// Any other answer is treated as a failure of the authorizer, and the upload is refused with a 502
+// The authorizer answers 200 with an AuthorizeResponse to allow the upload, or 403 to refuse it
+// Any other answer, a 404 included, is treated as a failure of the authorizer, and the upload is refused with a 502
 type AuthorizeRequest struct {
 	// Version of the contract, always AuthorizeVersion
 	Version string `json:"version"`

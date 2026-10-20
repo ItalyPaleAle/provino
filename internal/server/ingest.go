@@ -79,6 +79,8 @@ func (s *Server) RouteIngest(w http.ResponseWriter, r *http.Request) {
 		ContentType: part.Header.Get(httpserver.HeaderContentType),
 	})
 	if errors.Is(err, authorizer.ErrRefused) {
+		// The refusal is the authorizer's decision, which is logged so an operator can tell it apart from a failure without asking the authorizer
+		slog.InfoContext(ctx, "The authorizer refused an upload", slog.String("subject", principal.Subject))
 		errUploadRefused.WriteResponse(w, r)
 		return
 	} else if err != nil {
@@ -103,10 +105,19 @@ func (s *Server) RouteIngest(w http.ResponseWriter, r *http.Request) {
 		variants:       decision.Variants,
 		notify:         notification,
 		subjectHash:    subjectHash(principal.Subject),
+		idChosen:       decision.ImageID != uuid.Nil(),
 	}
-	if in.imageID == uuid.Nil() {
+	if !in.idChosen {
 		in.imageID = uuid.NewV4()
 	}
+
+	// An ID the authorizer chose may already be in use, which is checked before a byte of the image is read
+	err = s.claimImageID(ctx, &in)
+	if err != nil {
+		s.respondWithError(w, r, err)
+		return
+	}
+	defer s.releaseImageID(ctx, in)
 
 	source, err := s.storeUpload(ctx, part, in)
 	if err != nil {

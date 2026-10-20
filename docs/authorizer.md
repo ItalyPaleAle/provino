@@ -99,11 +99,11 @@ Answer `200` with the decision:
 | `variants` | no | Variants to generate once the original is stored. If omitted, the job only records the image |
 | `notify` | no | Where the job reports its outcome: the name of an endpoint in `notify.endpoints` (or omit it for the default one), and a context object echoed back in the event |
 
-Answer `403` or `404` to refuse the upload, and the browser gets a `403 upload_refused`.
+Answer `403` to refuse the upload, and the browser gets a `403 upload_refused`. provino logs every refusal, with the caller's subject.
 
 Any other answer is treated as a failure of the authorizer, and the browser gets a `502 authorizer_failed`. That includes:
 
-- any other status, or a redirect
+- any other status, or a redirect. A `404` is a failure too, since it's what a mistyped `authorizer.http.url` gets, and the log says so
 - no answer within the timeout
 - an answer larger than 256 KB
 - invalid JSON, or a decision that fails validation, such as an invalid namespace, a UUID that is not a supported version, an invalid variant, or an unknown notification endpoint

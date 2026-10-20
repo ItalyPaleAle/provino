@@ -26,7 +26,7 @@ var (
 	errInvalidNotify    = httpserver.NewApiError("invalid_notify", http.StatusBadRequest, "Invalid notification")
 	errInvalidFormat    = httpserver.NewApiError("invalid_source_format", http.StatusBadRequest, "Invalid source format")
 
-	errImageExists       = httpserver.NewApiError("image_exists", http.StatusConflict, "An image is already stored with this ID")
+	errImageExists       = httpserver.NewApiError("image_exists", http.StatusConflict, "An image with this ID is already stored, or being stored")
 	errImageTooLarge     = httpserver.NewApiError("image_too_large", http.StatusRequestEntityTooLarge, "Uploaded image is larger than allowed")
 	errUnsupportedFormat = httpserver.NewApiError("unsupported_format", http.StatusUnsupportedMediaType, "Uploaded file is not an image in an accepted format")
 	errUnreadableImage   = httpserver.NewApiError("unreadable_image", http.StatusUnsupportedMediaType, "Uploaded image cannot be decoded")

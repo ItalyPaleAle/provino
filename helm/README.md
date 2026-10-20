@@ -302,7 +302,7 @@ The identity provider has to trust the cluster's service account issuer for this
 | `podSecurityContext` | object | runs as UID/GID 65532 | Pod-level security context. |
 | `securityContext` | object | no privilege escalation, read-only root, all capabilities dropped | Container-level security context. |
 | `resources` | object | `{}` | Resource requests and limits. With no `config.images.maxConcurrentEncodes`, the CPU limit also bounds how many variants a pod encodes at once. |
-| `livenessProbe` / `readinessProbe` / `startupProbe` | object | enabled | Probe settings. Each requests `/healthz`. |
+| `livenessProbe` / `readinessProbe` / `startupProbe` | object | enabled | Probe settings. The liveness probe requests `/healthz`, and the startup and readiness probes request `/readyz`, which answers once the replica can run jobs. |
 | `terminationGracePeriodSeconds` | int | `60` | Time a pod gets to shut down. |
 | `updateStrategy` | object | `{type: RollingUpdate}` | StatefulSet update strategy. |
 | `podManagementPolicy` | string | `Parallel` | `Parallel` or `OrderedReady`. |

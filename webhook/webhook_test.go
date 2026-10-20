@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -187,6 +188,11 @@ func TestVerifierJWKSRefreshesOnUnknownKey(t *testing.T) {
 
 	v, err := NewVerifier(t.Context(), WithJWKS(server.URL, server.Client()))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The test's context is already canceled when cleanups run
+		closeErr := v.Close(context.Background())
+		assert.NoError(t, closeErr)
+	})
 	clock := time.Now()
 	v.now = func() time.Time {
 		return clock
@@ -209,6 +215,69 @@ func TestVerifierJWKSRefreshesOnUnknownKey(t *testing.T) {
 	err = v.Verify(t.Context(), signedHeader("msg_3", clock, SignEd25519(forger, "msg_3", clock, body)), body)
 	require.ErrorIs(t, err, ErrInvalidSignature)
 	assert.EqualValues(t, 2, fetches.Load())
+}
+
+// A JWKS that can't be fetched again leaves the receiver with the keys it already had, and doesn't make every request try
+func TestVerifierJWKSKeepsKeysWhenRefreshesFail(t *testing.T) {
+	public, private := newKey(t)
+	_, forger := newKey(t)
+
+	var failing atomic.Bool
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		if failing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(JWKS{Keys: []JWK{NewEd25519JWK("k1", public)}})
+	}))
+	t.Cleanup(server.Close)
+
+	v, err := NewVerifier(t.Context(), WithJWKS(server.URL, server.Client()))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The test's context is already canceled when cleanups run
+		closeErr := v.Close(context.Background())
+		assert.NoError(t, closeErr)
+	})
+	clock := time.Now()
+	v.now = func() time.Time {
+		return clock
+	}
+	body := []byte(`{}`)
+	sign := func(id string, key ed25519.PrivateKey) http.Header {
+		return signedHeader(id, clock, SignEd25519(key, id, clock, body))
+	}
+
+	// provino becomes unreachable, long after the set was fetched
+	failing.Store(true)
+	clock = clock.Add(2 * jwksMaxAge)
+
+	// A signature that misses tries to fetch the set once, and fails
+	err = v.Verify(t.Context(), sign("msg_1", forger), body)
+	require.ErrorIs(t, err, ErrInvalidSignature)
+	assert.EqualValues(t, 2, fetches.Load())
+
+	// The keys fetched before still verify, without another fetch
+	err = v.Verify(t.Context(), sign("msg_2", private), body)
+	require.NoError(t, err)
+
+	// A failed attempt counts against the interval like a successful one
+	err = v.Verify(t.Context(), sign("msg_3", forger), body)
+	require.ErrorIs(t, err, ErrInvalidSignature)
+	assert.EqualValues(t, 2, fetches.Load())
+}
+
+func TestNewVerifierFailsWhenTheJWKSCantBeFetched(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := NewVerifier(t.Context(), WithJWKS(server.URL, server.Client()))
+	require.ErrorContains(t, err, "failed to fetch the JWKS")
 }
 
 func TestNewVerifierRequiresAKey(t *testing.T) {

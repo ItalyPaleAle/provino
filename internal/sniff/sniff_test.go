@@ -63,3 +63,28 @@ func TestDetect(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeFormat(t *testing.T) {
+	accepted := map[string]string{
+		"jpg":    "jpg",
+		"jpeg":   "jpg",
+		"JPEG":   "jpg",
+		".JPG":   "jpg",
+		" png ":  "png",
+		"WebP":   "webp",
+		".avif":  "avif",
+		"heic":   "heic",
+		"HEIF":   "heif",
+		" .jpeg": "jpg",
+	}
+	for in, want := range accepted {
+		got, ok := NormalizeFormat(in)
+		assert.True(t, ok, in)
+		assert.Equal(t, want, got, in)
+	}
+
+	for _, in := range []string{"", "gif", "svg", "jp", "..jpg", "image/jpeg"} {
+		_, ok := NormalizeFormat(in)
+		assert.False(t, ok, in)
+	}
+}

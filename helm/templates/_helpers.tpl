@@ -170,12 +170,12 @@ The actor address isn't one of them: it's different for every pod, so the PROVIN
 {{- end }}
 
 {{/*
-A container probe that requests the health endpoint on the API port
-Expects a dict with "context", "probe", and, optionally, "successThreshold" set to true for probes that accept the field
+A container probe that requests a health endpoint on the API port
+Expects a dict with "context", "probe", "path", and, optionally, "successThreshold" set to true for probes that accept the field
 */}}
 {{- define "provino.probe" -}}
 httpGet:
-  path: /healthz
+  path: {{ .path }}
   port: http
   scheme: {{ if include "provino.config.usesTLS" .context }}HTTPS{{ else }}HTTP{{ end }}
 initialDelaySeconds: {{ int .probe.initialDelaySeconds }}

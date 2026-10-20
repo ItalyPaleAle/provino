@@ -13,8 +13,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/jwx-go/jwkfetch/v4"
+	"github.com/lestrrat-go/httprc/v3"
+	"github.com/lestrrat-go/httprc/v3/errsink"
+	"github.com/lestrrat-go/jwx/v4/jwa"
+	"github.com/lestrrat-go/jwx/v4/jwk"
 )
 
 // DefaultTolerance is how far a request's timestamp may be from the receiver's clock before the request is refused as a replay
@@ -23,9 +29,11 @@ const DefaultTolerance = 5 * time.Minute
 // Bounds on fetching a JWKS, so a misbehaving server can't make a receiver allocate or wait without limit
 const (
 	jwksFetchTimeout = 10 * time.Second
+	jwksMaxBodySize  = 64 << 10 // 64KB
 	// A signature that matches no known key triggers a refresh, but no more often than this, so forged requests can't turn the receiver into a load generator against provino
+	// It's also the shortest interval the background refresh honors when the server asks for a shorter one
 	jwksMinRefreshInterval = time.Minute
-	// Keys are refreshed at least this often even when every signature matches, so a revoked key stops being accepted
+	// Keys are refreshed in the background at least this often even when every signature matches, so a revoked key stops being accepted
 	jwksMaxAge = time.Hour
 )
 
@@ -42,6 +50,8 @@ var (
 type Verifier struct {
 	hmacKeys    [][]byte
 	ed25519Keys []ed25519.PublicKey
+	jwksURL     string
+	jwksClient  *http.Client
 	jwks        *jwksSource
 	tolerance   time.Duration
 	now         func() time.Time
@@ -79,14 +89,19 @@ func WithEd25519PublicKeys(keys ...ed25519.PublicKey) VerifierOption {
 }
 
 // WithJWKS accepts `v1a` signatures made with any Ed25519 key in the JWKS provino publishes at `/.well-known/provino-keys.json`
-// The key set is fetched by NewVerifier, refreshed every hour, and fetched again early when a signature matches no known key, which is what picks up a rotated key
-// If client is nil, http.DefaultClient is used
+// The key set is fetched by NewVerifier and refreshed in the background, at least every hour, until Close is called
+// A signature that matches no known key fetches it again early, which is what picks up a rotated key, and a refresh that fails keeps the keys fetched last
+// If client is nil, http.DefaultClient is used; either way redirects can't downgrade to plain HTTP, and a client without a timeout gets one
 func WithJWKS(url string, client *http.Client) VerifierOption {
 	return func(v *Verifier) error {
+		if url == "" {
+			return errors.New("the JWKS URL is empty")
+		}
 		if client == nil {
 			client = http.DefaultClient
 		}
-		v.jwks = &jwksSource{url: url, client: client}
+		v.jwksURL = url
+		v.jwksClient = jwkfetch.WrapHTTPClientDefaults(client)
 		return nil
 	}
 }
@@ -104,6 +119,7 @@ func WithTolerance(tolerance time.Duration) VerifierOption {
 
 // NewVerifier creates a Verifier
 // When it's configured with WithJWKS, the key set is fetched before this returns, so a receiver that can't reach provino fails at startup rather than on its first request
+// ctx bounds that first fetch only, and Close stops the background refreshes that follow it
 func NewVerifier(ctx context.Context, opts ...VerifierOption) (*Verifier, error) {
 	v := &Verifier{
 		tolerance: DefaultTolerance,
@@ -116,18 +132,27 @@ func NewVerifier(ctx context.Context, opts ...VerifierOption) (*Verifier, error)
 		}
 	}
 
-	if len(v.hmacKeys) == 0 && len(v.ed25519Keys) == 0 && v.jwks == nil {
+	if len(v.hmacKeys) == 0 && len(v.ed25519Keys) == 0 && v.jwksURL == "" {
 		return nil, errors.New("the verifier needs at least one HMAC secret, Ed25519 public key, or JWKS")
 	}
 
-	if v.jwks != nil {
-		_, err := v.jwks.refresh(ctx, v.now())
+	if v.jwksURL != "" {
+		var err error
+		v.jwks, err = newJWKSSource(ctx, v.jwksURL, v.jwksClient, v.now())
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return v, nil
+}
+
+// Close stops the background refreshes of the JWKS, and does nothing for a verifier without one
+func (v *Verifier) Close(ctx context.Context) error {
+	if v.jwks == nil {
+		return nil
+	}
+	return v.jwks.close(ctx)
 }
 
 // Verify checks the Standard Webhooks headers of a request against its body
@@ -160,16 +185,17 @@ func (v *Verifier) Verify(ctx context.Context, header http.Header, body []byte) 
 		return ErrInvalidSignature
 	}
 
-	// The cached key set is tried first, and a miss refreshes it, because the miss may be the first request signed with a rotated key
-	keys := v.jwks.cached(now)
-	if v.matches(content, signatures, keys) {
+	// The cached key set is the last one fetched successfully, so a background refresh that failed still leaves the keys that were known
+	if v.matches(content, signatures, v.jwks.keys(ctx)) {
 		return nil
 	}
-	keys, err = v.jwks.refresh(ctx, now)
+
+	// A miss may be the first request signed with a rotated key, so it fetches the set again, as long as no other miss did within the minimum interval
+	refreshed, err := v.jwks.refreshOnMiss(ctx, now)
 	if err != nil {
 		return errors.Join(ErrInvalidSignature, err)
 	}
-	if v.matches(content, signatures, keys) {
+	if refreshed && v.matches(content, signatures, v.jwks.keys(ctx)) {
 		return nil
 	}
 
@@ -227,44 +253,137 @@ func (v *Verifier) matches(content []byte, signatures []string, ed25519Keys []ed
 	return false
 }
 
-// jwksSource keeps the Ed25519 keys of a JWKS, refreshing them when they're stale or when a signature matches none of them
+// jwksSource keeps the Ed25519 keys of a JWKS, which a jwkfetch cache refreshes in the background
+// The cache serves the last set it fetched successfully, so neither a failed refresh nor a lock held during a fetch stands between a request and the keys already known
 type jwksSource struct {
-	url    string
-	client *http.Client
-
-	mu        sync.Mutex
-	keys      []ed25519.PublicKey
-	fetchedAt time.Time
+	url   string
+	cache *jwkfetch.Cache
+	// When the last refresh triggered by a miss was attempted, as Unix nanoseconds, whether it succeeded or not
+	lastRefresh atomic.Int64
 }
 
-// Return the cached keys, or nil when they're older than the maximum age, which makes the caller refresh them
-func (s *jwksSource) cached(now time.Time) []ed25519.PublicKey {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Fetch the key set and keep it refreshed until close is called
+func newJWKSSource(ctx context.Context, url string, client *http.Client, now time.Time) (*jwksSource, error) {
+	// Give up on the first fetch after its timeout, and stop waiting as soon as a fetch reports why it failed
+	readyCtx, cancelReady := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancelReady()
+	fetchErrCh := make(chan error, 1)
+	fetchErrSink := errsink.NewFunc(func(_ context.Context, fetchErr error) {
+		// Only the first error matters: it's the one that explains why the set never became ready
+		select {
+		case fetchErrCh <- fetchErr:
+			cancelReady()
+		default:
+		}
+	})
 
-	if now.Sub(s.fetchedAt) > jwksMaxAge {
+	// The refreshes outlive the context of the first fetch, so they stop on close rather than when the caller's context ends
+	cache, err := jwkfetch.NewCache(
+		context.WithoutCancel(ctx),
+		httprc.NewClient(
+			httprc.WithHTTPClient(client),
+			httprc.WithWhitelist(httprc.NewMapWhitelist().Add(url)),
+			httprc.WithErrorSink(fetchErrSink),
+		),
+		jwkfetch.WithHTTPClient(client),
+		jwkfetch.WithMaxBodySize(jwksMaxBodySize),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the JWKS cache: %w", err)
+	}
+
+	// Block until the first set is ready, so a receiver that can't reach provino fails at startup
+	err = cache.Register(readyCtx, url,
+		jwkfetch.WithWaitReady(true),
+		jwkfetch.WithMinInterval(jwksMinRefreshInterval),
+		jwkfetch.WithMaxInterval(jwksMaxAge),
+	)
+	if err != nil {
+		// Report what the fetch failed on rather than only that the set never became ready
+		select {
+		case fetchErr := <-fetchErrCh:
+			err = fetchErr
+		default:
+		}
+
+		// The caller's context may be what ended the wait, and shutting the cache down still needs a live deadline
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer shutdownCancel()
+		shutdownErr := cache.Shutdown(shutdownCtx)
+		return nil, errors.Join(fmt.Errorf("failed to fetch the JWKS: %w", err), shutdownErr)
+	}
+
+	s := &jwksSource{url: url, cache: cache}
+
+	// The first fetch counts as an attempt, so a miss right after startup doesn't fetch the set again
+	s.lastRefresh.Store(now.UnixNano())
+
+	return s, nil
+}
+
+// Return the Ed25519 keys of the last set fetched successfully
+func (s *jwksSource) keys(ctx context.Context) []ed25519.PublicKey {
+	set, err := s.cache.Lookup(ctx, s.url)
+	if err != nil {
 		return nil
 	}
-	return s.keys
+	return ed25519KeysOf(set)
 }
 
-// Fetch the key set again, unless it was fetched less than the minimum interval ago
-func (s *jwksSource) refresh(ctx context.Context, now time.Time) ([]ed25519.PublicKey, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.fetchedAt.IsZero() && now.Sub(s.fetchedAt) < jwksMinRefreshInterval {
-		return s.keys, nil
+// Fetch the set again after a signature matched no known key, reporting whether a fetch was made
+// Attempts rather than successes are spaced out, so neither forged signatures nor an unreachable server can make every request fetch the set
+func (s *jwksSource) refreshOnMiss(ctx context.Context, now time.Time) (bool, error) {
+	last := s.lastRefresh.Load()
+	if now.Sub(time.Unix(0, last)) < jwksMinRefreshInterval {
+		return false, nil
 	}
 
-	keys, err := FetchJWKS(ctx, s.client, s.url)
+	// When several misses arrive together, one of them fetches and the others don't wait for it
+	if !s.lastRefresh.CompareAndSwap(last, now.UnixNano()) {
+		return false, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancel()
+	_, err := s.cache.Refresh(ctx, s.url)
 	if err != nil {
-		return s.keys, err
+		return true, fmt.Errorf("failed to refresh the JWKS: %w", err)
 	}
-	s.keys = keys
-	s.fetchedAt = now
+	return true, nil
+}
 
-	return keys, nil
+// Stop the background refreshes
+func (s *jwksSource) close(ctx context.Context) error {
+	err := s.cache.Shutdown(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to stop the JWKS cache: %w", err)
+	}
+	return nil
+}
+
+// Extract the Ed25519 public keys of a set, ignoring keys of any other type
+func ed25519KeysOf(set jwk.Set) []ed25519.PublicKey {
+	keys := make([]ed25519.PublicKey, 0, set.Len())
+	for i := range set.Len() {
+		key, ok := set.Key(i)
+		if !ok || key.KeyType() != jwa.OKP() {
+			continue
+		}
+		okp, ok := key.(jwk.OKPPublicKey)
+		if !ok {
+			continue
+		}
+		curve, ok := okp.Crv()
+		if !ok || curve != jwa.Ed25519() {
+			continue
+		}
+		raw, err := jwk.Export[ed25519.PublicKey](key)
+		if err != nil {
+			continue
+		}
+		keys = append(keys, raw)
+	}
+	return keys
 }
 
 // JWK is one key in a JWKS, as provino publishes its Ed25519 signing keys

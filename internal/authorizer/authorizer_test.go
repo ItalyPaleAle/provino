@@ -116,15 +116,24 @@ func TestHTTPAuthorizer(t *testing.T) {
 		assert.Empty(t, decision.Variants)
 	})
 
-	for _, status := range []int{http.StatusForbidden, http.StatusNotFound} {
-		t.Run("a "+http.StatusText(status)+" is a refusal", func(t *testing.T) {
-			a := newHTTPAuthorizer(t, func(_ webhook.AuthorizeRequest, w http.ResponseWriter) {
-				answer(w, status, map[string]string{"error": "no"})
-			})
-			_, err := a.Authorize(t.Context(), Request{Subject: "user-1"})
-			require.ErrorIs(t, err, ErrRefused)
+	t.Run("a 403 is a refusal", func(t *testing.T) {
+		a := newHTTPAuthorizer(t, func(_ webhook.AuthorizeRequest, w http.ResponseWriter) {
+			answer(w, http.StatusForbidden, map[string]string{"error": "no"})
 		})
-	}
+		_, err := a.Authorize(t.Context(), Request{Subject: "user-1"})
+		require.ErrorIs(t, err, ErrRefused)
+	})
+
+	// A mistyped URL answers 404, which has to surface as a failure rather than as every caller being refused
+	t.Run("a 404 is a failure that points at the URL", func(t *testing.T) {
+		a := newHTTPAuthorizer(t, func(_ webhook.AuthorizeRequest, w http.ResponseWriter) {
+			http.NotFound(w, nil)
+		})
+		_, err := a.Authorize(t.Context(), Request{Subject: "user-1"})
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrRefused)
+		assert.ErrorContains(t, err, "authorizer.http.url")
+	})
 
 	failures := map[string]func(w http.ResponseWriter){
 		"a server error": func(w http.ResponseWriter) { answer(w, http.StatusInternalServerError, map[string]string{}) },
