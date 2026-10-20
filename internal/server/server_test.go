@@ -25,6 +25,8 @@ import (
 	"github.com/davidbyttow/govips/v2/vips"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/italypaleale/provino/client"
 	"github.com/italypaleale/provino/internal/actors"
@@ -170,8 +172,10 @@ type testServerOptions struct {
 	// Ed25519 signing keys to publish
 	signingKeys *signing.KeySet
 	// Closed once the service can run jobs
-	ready     <-chan struct{}
-	configure func(c *config.Config)
+	ready <-chan struct{}
+	// Tracer provider the requests are traced with
+	traceProvider *sdktrace.TracerProvider
+	configure     func(c *config.Config)
 }
 
 func newTestServer(t *testing.T, opts testServerOptions) *testServer {
@@ -231,6 +235,7 @@ func newTestServer(t *testing.T, opts testServerOptions) *testServer {
 		Notifier:      notifier,
 		SigningKeys:   opts.signingKeys,
 		Ready:         opts.ready,
+		TraceProvider: opts.traceProvider,
 	}
 	if !opts.noAuthorizer {
 		serverOpts.Authorizer = ts.authz
@@ -356,6 +361,145 @@ func TestReadyRoute(t *testing.T) {
 	// Without a readiness signal the service is always ready
 	ts = newTestServer(t, testServerOptions{})
 	assert.Equal(t, http.StatusNoContent, get("/readyz"))
+}
+
+// Spans are named after the route that served them, and record the client behind a trusted proxy rather than the proxy or a made-up address
+func TestRequestTracing(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	ts := newTestServer(t, testServerOptions{traceProvider: provider, configure: func(c *config.Config) {
+		c.Server.TrustedProxies = []string{"10.0.0.0/8"}
+	}})
+
+	// Serve one request and return the span it produced
+	trace := func(t *testing.T, req *http.Request) sdktrace.ReadOnlySpan {
+		t.Helper()
+		before := len(recorder.Ended())
+		ts.do(t, req)
+		ended := recorder.Ended()
+		require.Len(t, ended, before+1)
+		return ended[len(ended)-1]
+	}
+	attribute := func(span sdktrace.ReadOnlySpan, key string) string {
+		for _, attr := range span.Attributes() {
+			if string(attr.Key) == key {
+				return attr.Value.String()
+			}
+		}
+		return ""
+	}
+
+	imageID := uuid.NewV4().String()
+	jobID := uuid.NewV7().String()
+
+	t.Run("a route of the top-level mux", func(t *testing.T) {
+		span := trace(t, newRequest(t, http.MethodGet, "/v1/client/images/default/"+imageID+"/jobs/"+jobID, serverKey, nil, ""))
+		assert.Equal(t, "GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}", span.Name())
+		assert.Equal(t, "/v1/client/images/{namespace}/{imageId}/jobs/{jobId}", attribute(span, "http.route"))
+	})
+
+	t.Run("a route of the nested public mux", func(t *testing.T) {
+		span := trace(t, newRequest(t, http.MethodGet, "/v1/public/images/default/"+imageID+"/jobs/"+jobID, browserKey, nil, ""))
+		assert.Equal(t, "GET /v1/public/images/{namespace}/{imageId}/jobs/{jobId}", span.Name())
+	})
+
+	t.Run("a path no route matches", func(t *testing.T) {
+		span := trace(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/nothing-here", nil))
+		assert.Equal(t, "GET", span.Name())
+		assert.Empty(t, attribute(span, "http.route"))
+	})
+
+	t.Run("the client behind a trusted proxy", func(t *testing.T) {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
+		req.RemoteAddr = "10.1.2.3:5555"
+		req.Header.Set("X-Forwarded-For", "192.0.2.99, 203.0.113.5")
+		span := trace(t, req)
+		assert.Equal(t, "203.0.113.5", attribute(span, "client.address"))
+	})
+
+	t.Run("a client claiming another address", func(t *testing.T) {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
+		req.RemoteAddr = "198.51.100.7:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113.5")
+		span := trace(t, req)
+		assert.Equal(t, "198.51.100.7", attribute(span, "client.address"))
+	})
+}
+
+// The request log records 404s, which is how a wrong path or an expired job shows up, but not the root path every crawler tries, nor 401s, which are logged with their reason
+func TestRequestLog(t *testing.T) {
+	var buf safeBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+	})
+	ts := newTestServer(t, testServerOptions{configure: func(c *config.Config) {
+		c.Server.TrustedProxies = []string{"10.0.0.0/8"}
+	}})
+
+	// Serve one request and report the request log lines it produced
+	logged := func(t *testing.T, req *http.Request) []map[string]any {
+		t.Helper()
+		buf.Reset()
+		ts.do(t, req)
+
+		var lines []map[string]any
+		for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var entry map[string]any
+			err := json.Unmarshal([]byte(line), &entry)
+			require.NoError(t, err, line)
+			_, isRequestLog := entry["request"]
+			if isRequestLog {
+				lines = append(lines, entry)
+			}
+		}
+		return lines
+	}
+
+	assert.Empty(t, logged(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)), "the root path is not logged")
+	assert.Empty(t, logged(t, newRequest(t, http.MethodPost, "/v1/client/optimize", "", nil, "")), "a 401 is not logged")
+
+	// A path no route matches is logged, with the client a trusted proxy names
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/client/nothing-here", nil)
+	req.RemoteAddr = "10.1.2.3:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	lines := logged(t, req)
+	require.Len(t, lines, 1)
+	request, ok := lines[0]["request"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/v1/client/nothing-here", request["path"])
+	assert.Equal(t, "203.0.113.5", request["ip"])
+	response, ok := lines[0]["response"].(map[string]any)
+	require.True(t, ok)
+	assert.EqualValues(t, http.StatusNotFound, response["status"])
+}
+
+// safeBuffer is a buffer the request log can write to while a test reads it
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p) //nolint:wrapcheck // This is the writer the logger calls, so its error is passed through as it is
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *safeBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func TestRunFailsWhenThePortIsTaken(t *testing.T) {

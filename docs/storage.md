@@ -10,12 +10,14 @@ storage:
 
 | Backend | Connection string |
 | --- | --- |
-| Local file system | `/path/to/folder`, `fs:/path/to/folder`, or `local:/path/to/folder` |
+| Local file system | `/path/to/folder`, `fs:/path/to/folder`, or `local:/path/to/folder`, optionally followed by `?fileMode=<mode>&dirMode=<mode>` |
 | S3, or an S3-compatible store | `s3://<access-key>:<secret-key>@s3.<region>.amazonaws.com/<bucket>?prefix=<key-prefix>&sessionToken=<token>` |
 | Vercel Blob, with a read-write token | `vercelblob:?tokenEnv=<environment-variable>&access=<private\|public>&prefix=<key-prefix>` |
 | Vercel Blob, with OIDC | `vercelblob:?auth=oidc&storeIdEnv=<environment-variable>&access=<private\|public>&prefix=<key-prefix>` |
 
 A `prefix` is applied by the backend to every key, so the keys below, and the keys in a manifest, are always relative to it.
+
+On the local file system, files are written as `0600` and folders as `0750` by default, so only the user provino runs as can read them. To serve the variants straight from the folder with a web server that runs as another user, give them wider permissions in the DSN, in octal, for example `fs:/var/lib/provino/data/variants?fileMode=0644&dirMode=0755`. The modes must keep read and write access for provino's own user, and a `?` in a local DSN always starts these options.
 
 provino doesn't serve images. Serve the variants from the store, using the keys in the manifest.
 

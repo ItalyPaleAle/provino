@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -57,6 +58,8 @@ type Server struct {
 	notifier      *notify.Notifier
 	jwks          []byte
 	ready         <-chan struct{}
+	// Reverse proxies whose forwarding headers name the client of a request
+	trustedProxies []netip.Prefix
 
 	// Method that forces a reload of TLS certificates from disk
 	tlsCertWatchFn tlsconfig.CertWatchFn
@@ -131,6 +134,17 @@ func NewServer(opts NewServerOpts) (*Server, error) {
 		ready:         opts.Ready,
 	}
 
+	// The configuration was validated already, so a proxy that doesn't parse here is a bug rather than an operator's mistake
+	cfg := config.Get()
+	s.trustedProxies = make([]netip.Prefix, 0, len(cfg.Server.TrustedProxies))
+	for _, proxy := range cfg.Server.TrustedProxies {
+		prefix, err := config.ParseTrustedProxy(proxy)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy '%s': %w", proxy, err)
+		}
+		s.trustedProxies = append(s.trustedProxies, prefix)
+	}
+
 	// The key set doesn't change while the process runs, so it's encoded once
 	if opts.SigningKeys != nil {
 		var err error
@@ -197,8 +211,12 @@ func (s *Server) initAppServer() (err error) {
 	mux.Handle("POST /v1/client/optimize", requireServer(http.HandlerFunc(s.RouteOptimize)))
 	mux.Handle("GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}", requireServer(http.HandlerFunc(s.RouteClientJobStatus)))
 
-	middlewares := make([]httpserver.Middleware, 0, 4)
+	// Middlewares are listed innermost first, since each one wraps the ones before it
+	middlewares := make([]httpserver.Middleware, 0, 6)
 	middlewares = append(middlewares,
+		// Name the request's span after the route the mux matched
+		// Only the request the mux received carries the pattern, so this has to sit right around the mux
+		middlewareSpanRoute,
 		// Recover from panics
 		sloghttp.Recovery,
 		// Limit request bodies to what an upload of the maximum allowed size needs
@@ -207,8 +225,13 @@ func (s *Server) initAppServer() (err error) {
 		httpserver.MiddlewareMaxBodySize(cfg.Images.MaxUploadSize+(1<<20)),
 	)
 
+	// A 401 is logged with its reason by the authentication middleware, and the root path answers 404 to every crawler and browser that tries it, so neither is worth a line of its own
+	// Every other 404 is logged, since it's how a client calling the wrong path or polling an expired job shows up
 	filters := []sloghttp.Filter{
-		sloghttp.IgnoreStatus(http.StatusUnauthorized, http.StatusNotFound),
+		sloghttp.IgnoreStatus(http.StatusUnauthorized),
+		func(w sloghttp.WrapResponseWriter, r *http.Request) bool {
+			return r.URL.Path != "/"
+		},
 	}
 	if cfg.Logs.OmitHealthChecks {
 		filters = append(filters,
@@ -225,9 +248,14 @@ func (s *Server) initAppServer() (err error) {
 
 	if s.traceProvider != nil {
 		middlewares = append(middlewares,
-			otelhttp.NewMiddleware("/"),
+			otelhttp.NewMiddleware("provino", otelhttp.WithTracerProvider(s.traceProvider)),
 		)
 	}
+
+	// The client's address is resolved before anything records it, so the request log and the traces both show the client behind a trusted proxy, and never an address a client made up
+	middlewares = append(middlewares,
+		middlewareClientIP(s.trustedProxies),
+	)
 
 	s.handler = httpserver.Use(mux, middlewares...)
 
