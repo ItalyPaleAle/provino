@@ -84,7 +84,9 @@ server:
 
 Only `/v1/public/*` answers cross-origin requests.
 
-Uploads are rate-limited per caller, by a token bucket keyed on the subject of the caller's token. The defaults admit two uploads a minute, with a burst of ten. When the service runs behind a load balancer, list its address in `server.trustedProxies`, so that a caller without a subject is limited by its own address rather than the balancer's.
+Uploads are rate-limited per caller, by a token bucket keyed on the subject of the caller's token. The defaults admit ten uploads a minute, with a burst of thirty, which lets a user drop a folder of photos in at once. Tune them with `rateLimit.rate`, `rateLimit.per` and `rateLimit.burst`.
+
+When the service runs behind a load balancer or a reverse proxy, list the addresses it connects from in `server.trustedProxies`. The request log and the traces then record the client each request was forwarded for, read from `X-Forwarded-For` or `X-Real-IP`, rather than the proxy. Those headers are dropped from every other request, so a client can't put an address of its choosing in the logs.
 
 An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, and may be up to `images.maxUploadSize` (32 MiB by default) and `images.maxSourcePixels` (100 megapixels by default).
 

@@ -111,7 +111,7 @@ service:
     annotations: {}
 
 # Ingress in front of the API, which is what browsers upload through
-# A reverse proxy in front of provino should be listed in config.server.trustedProxies, or rate limiting sees every upload as coming from the proxy
+# A reverse proxy in front of provino should be listed in config.server.trustedProxies, or the request log and the traces record the proxy's address instead of each client's
 # The ingress controller's own limit on request bodies has to allow for images.maxUploadSize, which is 32 MiB by default
 ingress:
   enabled: false

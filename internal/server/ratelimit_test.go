@@ -30,20 +30,19 @@ func (s *stubRateLimiter) Allow(_ context.Context, key string) (bool, time.Durat
 }
 
 func TestMiddlewareRateLimit(t *testing.T) {
-	t.Run("allows the request", func(t *testing.T) {
+	t.Run("refuses a request that didn't go through authentication", func(t *testing.T) {
 		limiter := &stubRateLimiter{allowed: true}
 		s := &Server{rateLimiter: limiter}
-		handler := s.middlewareRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNoContent)
+		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("a request without a caller reached the handler")
 		}))
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
-		req.RemoteAddr = "198.51.100.7:1234"
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusNoContent, rec.Code)
-		assert.Equal(t, []string{"ip-198.51.100.7"}, limiter.keys)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Empty(t, limiter.keys)
 	})
 
 	// The budget belongs to the caller, so two callers behind one address don't share it, and the key never repeats the subject itself
@@ -73,7 +72,7 @@ func TestMiddlewareRateLimit(t *testing.T) {
 		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("rate-limited request reached the handler")
 		}))
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
+		req := httptest.NewRequestWithContext(auth.WithPrincipal(t.Context(), auth.Principal{Subject: "user-1"}), http.MethodPost, "/v1/public/ingest", nil)
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
@@ -89,38 +88,11 @@ func TestMiddlewareRateLimit(t *testing.T) {
 		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("request reached the handler after a rate-limit error")
 		}))
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
+		req := httptest.NewRequestWithContext(auth.WithPrincipal(t.Context(), auth.Principal{Subject: "user-1"}), http.MethodPost, "/v1/public/ingest", nil)
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	})
-}
-
-func TestClientIP(t *testing.T) {
-	t.Run("ignores forwarded headers from an untrusted peer", func(t *testing.T) {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
-		req.RemoteAddr = "192.0.2.10:1234"
-		req.Header.Set("X-Forwarded-For", "198.51.100.7")
-
-		assert.Equal(t, "192.0.2.10", clientIP(req, nil))
-	})
-
-	t.Run("uses the original client behind a trusted proxy", func(t *testing.T) {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
-		req.RemoteAddr = "192.0.2.10:1234"
-		req.Header.Set("X-Forwarded-For", "198.51.100.7, 192.0.2.10")
-
-		assert.Equal(t, "198.51.100.7", clientIP(req, []string{"192.0.2.0/24"}))
-	})
-
-	t.Run("always returns a Francis actor ID", func(t *testing.T) {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
-		req.RemoteAddr = ""
-
-		key := clientIP(req, nil)
-		require.NotEmpty(t, key)
-		assert.NotContains(t, key, "/")
 	})
 }

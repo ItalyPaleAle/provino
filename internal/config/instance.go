@@ -55,9 +55,9 @@ func GetDefaultConfig() *Config {
 			},
 		},
 		RateLimit: ConfigRateLimit{
-			Rate:  2,
+			Rate:  10,
 			Per:   time.Minute,
-			Burst: 10,
+			Burst: 30,
 		},
 		Actors: ConfigActors{
 			Runtime:                    ActorRuntimeEmbedded,

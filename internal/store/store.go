@@ -56,12 +56,12 @@ type NewOpts struct {
 
 // New creates a Store from the DSN of each of its two backends
 func New(opts NewOpts) (*Store, error) {
-	originals, err := objstore.New(opts.OriginalsDSN, objstore.Options{})
+	originals, err := newBackend(opts.OriginalsDSN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the storage backend for the originals: %w", err)
 	}
 
-	variants, err := objstore.New(opts.VariantsDSN, objstore.Options{})
+	variants, err := newBackend(opts.VariantsDSN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the storage backend for the variants: %w", err)
 	}

@@ -23,6 +23,16 @@ func TestCORSAllowsConfiguredOrigins(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, recorder.Code)
 	assert.Equal(t, "https://allowed.example", recorder.Header().Get("Access-Control-Allow-Origin"))
 	assert.Contains(t, recorder.Header().Get("Access-Control-Allow-Headers"), "Authorization")
+	// The preflight's answer is cached, so the browser doesn't ask again before every request
+	assert.Equal(t, "7200", recorder.Header().Get("Access-Control-Max-Age"))
+
+	// The cache lifetime only means something on a preflight
+	request = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
+	request.Header.Set("Origin", "https://allowed.example")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	assert.Equal(t, http.StatusAccepted, recorder.Code)
+	assert.Empty(t, recorder.Header().Get("Access-Control-Max-Age"))
 }
 
 func TestCORSRefusesOtherOrigins(t *testing.T) {
@@ -35,4 +45,5 @@ func TestCORSRefusesOtherOrigins(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 	assert.Empty(t, recorder.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, recorder.Header().Get("Access-Control-Max-Age"))
 }

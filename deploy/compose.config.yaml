@@ -10,7 +10,7 @@ server:
   # The pages browsers upload from, once an authorizer is configured below
   #corsAllowedOrigins:
   #  - https://app.example.com
-  # The reverse proxy in front of provino, if there is one, so rate limiting can tell its clients apart
+  # The reverse proxy in front of provino, if there is one, so the logs and traces record its clients' addresses rather than its own
   #trustedProxies:
   #  - 172.16.0.0/12
 

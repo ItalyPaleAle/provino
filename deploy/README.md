@@ -138,7 +138,7 @@ The defaults suit a single instance. Running more than one, on separate hosts, t
 
 The mounted configuration is already a Secret because it contains the signing secrets. For separately rotated S3 or Vercel Blob credentials, mount another Secret as a file or pass it as an environment variable the storage DSN names with `tokenEnv`.
 
-If the service sits behind a reverse proxy, set `server.trustedProxies` to the proxy's address, or its rate limiting will see every request as coming from one client.
+If the service sits behind a reverse proxy, set `server.trustedProxies` to the proxy's address, so the request log and the traces record each client's address rather than the proxy's.
 
 ### Publishing on another port
 

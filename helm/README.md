@@ -163,7 +163,7 @@ httpRoute:
   hostnames: [images.example.com]
 ```
 
-Behind either one, set `config.server.publicUrl` to the public origin, and list the addresses the proxy connects from in `config.server.trustedProxies`, or rate limiting sees every upload as coming from the proxy.
+Behind either one, set `config.server.publicUrl` to the public origin, and list the addresses the proxy connects from in `config.server.trustedProxies`, or the request log and the traces record the proxy's address instead of each client's.
 
 The proxy's limit on request bodies has to be at least `config.images.maxUploadSize`, which is 32 MiB by default, and its read timeout has to allow for a slow upload, up to `config.server.readTimeout`.
 

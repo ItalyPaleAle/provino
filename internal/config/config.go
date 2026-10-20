@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -129,7 +130,8 @@ type ConfigServer struct {
 	// Only the public routes answer cross-origin requests; the client API never does
 	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins"`
 
-	// IP addresses or CIDRs of reverse proxies whose X-Forwarded-For and X-Real-IP headers can identify rate-limit clients
+	// IP addresses or CIDRs of the reverse proxies in front of this service, such as a load balancer or an ingress controller
+	// A request from one of them is logged and traced with the client address its X-Forwarded-For or X-Real-IP header names, and those headers are dropped from any other request, so a client can't make up its own address
 	TrustedProxies []string `yaml:"trustedProxies"`
 
 	// Maximum time to read a whole request, including its body
@@ -440,6 +442,7 @@ type ConfigImages struct {
 type ConfigStorage struct {
 	// Where the uploaded source images are stored
 	// Local file system: `fs:/path/to/folder`, `local:/path/to/folder`, or a path with no protocol at all
+	// A local folder can end with `?fileMode=0644&dirMode=0755` to set the permissions of the files and folders it gets, which default to `0600` and `0750`
 	// S3: `s3://<access-key>:<secret-key>@s3.<region>.amazonaws.com/<bucket>?prefix=<key-prefix>&sessionToken=<token>`
 	// Vercel Blob with a read-write token: `vercelblob:?tokenEnv=<environment-variable>&access=private&prefix=<key-prefix>`
 	// Vercel Blob with OIDC: `vercelblob:?auth=oidc&storeIdEnv=<environment-variable>&access=private&prefix=<key-prefix>`
@@ -462,7 +465,7 @@ type ConfigStorage struct {
 // ConfigRateLimit configures the Francis rate-limit actor protecting browser uploads
 type ConfigRateLimit struct {
 	// Number of uploads admitted per caller during each `per` interval
-	// +default 2
+	// +default 10
 	Rate int `yaml:"rate"`
 
 	// Interval over which `rate` uploads are admitted
@@ -470,7 +473,8 @@ type ConfigRateLimit struct {
 	Per time.Duration `yaml:"per"`
 
 	// Maximum number of uploads from one caller that can be admitted at once before throttling starts
-	// +default 10
+	// It's what lets a user drop a whole folder of photos in at once, while `rate` bounds a steady stream
+	// +default 30
 	Burst int `yaml:"burst"`
 }
 
@@ -690,16 +694,15 @@ func (c *Config) validateServer() error {
 		c.Server.CORSAllowedOrigins[i] = origin
 	}
 
-	// Validate proxy trust before forwarded addresses can become rate-limit keys
+	// Validate proxy trust before forwarded addresses can name the client in logs and traces
 	for _, trustedProxy := range c.Server.TrustedProxies {
 		if trustedProxy == "" {
 			return errors.New("configuration option 'server.trustedProxies' must not contain empty entries")
 		}
 
-		_, _, cidrErr := net.ParseCIDR(trustedProxy)
-		ip := net.ParseIP(trustedProxy)
-		if cidrErr != nil && ip == nil {
-			return errors.New("configuration option 'server.trustedProxies' entries must be IPs or CIDRs")
+		_, err := ParseTrustedProxy(trustedProxy)
+		if err != nil {
+			return fmt.Errorf("configuration option 'server.trustedProxies' contains '%s', which is not an IP or a CIDR", trustedProxy)
 		}
 	}
 
@@ -1276,6 +1279,26 @@ func (c *Config) validateImages() error {
 	}
 
 	return nil
+}
+
+// ParseTrustedProxy parses an entry of 'server.trustedProxies', an IP address or a CIDR, into the network it covers
+// A single address is a network of just that address
+func ParseTrustedProxy(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "/") {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid CIDR: %w", err)
+		}
+		return prefix.Masked(), nil
+	}
+
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid IP address: %w", err)
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // Report whether a value is an absolute HTTP origin, with no path, query or credentials
