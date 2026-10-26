@@ -5,5 +5,9 @@
     "golang.org/x/*"
   ],
   "allow": [
+    {
+      "module": "github.com/lestrrat-go/jwx/v4",
+      "version": "v4.6.0"
+    }
   ]
 }

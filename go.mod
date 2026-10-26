@@ -1,17 +1,17 @@
 module github.com/italypaleale/provino
 
-go 1.27.2
+go 1.27.3
 
 tool github.com/fchimpan/gomod-age
 
 require (
-	github.com/davidbyttow/govips/v2 v2.19.0
-	github.com/italypaleale/francis v0.2.0-rc.1
-	github.com/italypaleale/go-kit v1.3.0
+	github.com/davidbyttow/govips/v2 v2.20.0
+	github.com/italypaleale/francis v0.2.0-rc.2
+	github.com/italypaleale/go-kit v1.6.0
 	github.com/jinzhu/copier v0.4.0
 	github.com/jwx-go/jwkfetch/v4 v4.0.4
 	github.com/lestrrat-go/httprc/v3 v3.0.6
-	github.com/lestrrat-go/jwx/v4 v4.5.0
+	github.com/lestrrat-go/jwx/v4 v4.6.0
 	github.com/samber/slog-http v1.12.1
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
@@ -56,7 +56,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
-	github.com/italypaleale/go-sql-utils v0.3.11 // indirect
+	github.com/italypaleale/go-sql-utils v0.3.12 // indirect
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -90,7 +90,6 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/swaggo/swag v1.16.6 // indirect
 	github.com/urfave/cli/v2 v2.27.7 // indirect
-	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
