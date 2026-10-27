@@ -6,7 +6,7 @@ tool github.com/fchimpan/gomod-age
 
 require (
 	github.com/davidbyttow/govips/v2 v2.20.0
-	github.com/italypaleale/francis v0.2.0-rc.2
+	github.com/italypaleale/francis v0.2.0
 	github.com/italypaleale/go-kit v1.6.0
 	github.com/jinzhu/copier v0.4.0
 	github.com/jwx-go/jwkfetch/v4 v4.0.4

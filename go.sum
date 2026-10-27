@@ -85,8 +85,8 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 h1:Bd7KaOxzULLxtZ/K5s1aLbWhR0+
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0/go.mod h1:nN7ts3dFXKtCZWc//yfkpcQNKJABg16/uDVAZpLDalo=
 github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs4luLUK2k=
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
-github.com/italypaleale/francis v0.2.0-rc.2 h1:GGoArft1mGbqHZO1zCkhBvaTMkGKStrHgGQbBhpqc9g=
-github.com/italypaleale/francis v0.2.0-rc.2/go.mod h1:4hz10SDQt9zlBz+0C2XbWmKENoeK8XjyrTxzM8pa6YU=
+github.com/italypaleale/francis v0.2.0 h1:GsG+40TJD7d+l5l/5qR3e5kKI2XhE50LVmMcD5Yf4AE=
+github.com/italypaleale/francis v0.2.0/go.mod h1:4hz10SDQt9zlBz+0C2XbWmKENoeK8XjyrTxzM8pa6YU=
 github.com/italypaleale/go-kit v1.6.0 h1:XrPmvb1zA5bEe4jougVsSA23rMdwlA9lmZvUHaOsHkI=
 github.com/italypaleale/go-kit v1.6.0/go.mod h1:OBjcvlAM6SdiVIBMzF2ttN8ZvC2VApQdIPN77WskaOc=
 github.com/italypaleale/go-sql-utils v0.3.12 h1:pRFKYoLICYggGEdd8ztnuAh3BDUCFIxKk+wzn6Wjz/I=
