@@ -121,19 +121,6 @@ Callers authenticate with a JWT from an OpenID Connect provider, with an API key
   - [Helm chart](helm/README.md): Kubernetes, with one replica or several
 - [Configuration reference](config.md), and an annotated [sample](config.sample.yaml)
 
-## Go packages
-
-Applications written in Go can use these packages, which don't need cgo:
-
-| Package | Contents |
-| --- | --- |
-| [`client`](client) | Calls to the client API, and the API's request and response types |
-| [`webhook`](webhook) | The event and authorizer types, HTTP handlers for both, and a Standard Webhooks verifier |
-| [`manifest`](manifest) | The manifest's types and a parser |
-| [`variant`](variant) | The variant spec, formats and fits |
-| [`imagekeys`](imagekeys) | The object key layout |
-| [`imagesize`](imagesize) | Which boxes a source can fill without being enlarged |
-
 ## License
 
 provino is released under the [MIT License](LICENSE.md).
