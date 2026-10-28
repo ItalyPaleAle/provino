@@ -12,12 +12,17 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 )
 
-// ErrQueueFull is returned when an image already has as many jobs waiting as it may
-var ErrQueueFull = errors.New("the image already has the maximum number of jobs waiting")
+var (
+	// ErrQueueFull is returned when an image already has as many jobs waiting as it may
+	ErrQueueFull = errors.New("the image already has the maximum number of jobs waiting")
+
+	// ErrUploadInProgress is returned for a job of an image that an upload is still storing, which can be queued again once the upload is done
+	ErrUploadInProgress = errors.New("the image is still being uploaded")
+)
 
 // Jobs is what the API handlers use to queue jobs and read their status
 type Jobs interface {
-	// Enqueue adds a job to its image's queue and returns its ID, or ErrQueueFull
+	// Enqueue adds a job to its image's queue and returns its ID, or ErrQueueFull or ErrUploadInProgress
 	Enqueue(ctx context.Context, req JobRequest) (EnqueueResult, error)
 	// Status returns a job's status, and the hash of the subject that started it when that's still known
 	// The boolean is false when the image has no such job, or when its status has expired
@@ -134,6 +139,9 @@ func (h *hostJobs) Enqueue(ctx context.Context, req JobRequest) (EnqueueResult, 
 	}
 	if result.QueueFull {
 		return EnqueueResult{}, ErrQueueFull
+	}
+	if result.UploadInProgress {
+		return EnqueueResult{}, ErrUploadInProgress
 	}
 
 	return EnqueueResult{JobID: result.JobID, Position: result.Position}, nil

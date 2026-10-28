@@ -54,7 +54,7 @@ func TestMiddlewareClientIP(t *testing.T) {
 		// Anyone can send these headers, so they only count from a trusted proxy
 		"a client claiming another address": {
 			remoteAddr: "198.51.100.7:1234",
-			headers:    map[string][]string{headerXForwardedFor: {"203.0.113.5"}, headerXRealIP: {"203.0.113.6"}},
+			headers:    map[string][]string{headerXForwardedFor: {"203.0.113.5"}, headerForwarded: {"for=203.0.113.7"}, headerXRealIP: {"203.0.113.6"}},
 			want:       "198.51.100.7:1234",
 		},
 		"the client behind a trusted proxy": {
@@ -107,6 +107,48 @@ func TestMiddlewareClientIP(t *testing.T) {
 			headers:    map[string][]string{headerXForwardedFor: {"203.0.113.5, not-an-ip"}},
 			want:       "10.1.2.3:5555",
 		},
+		"Forwarded from a trusted proxy": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"for=203.0.113.5;proto=https;by=10.1.2.3"}},
+			want:       "203.0.113.5",
+		},
+		"Forwarded with a quoted IPv6 address and a port": {
+			remoteAddr: "[2001:db8::1]:5555",
+			headers:    map[string][]string{headerForwarded: {`for="[2001:db8::42]:4711"`}},
+			want:       "[2001:db8::42]",
+		},
+		"Forwarded parameter names in any case": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"Proto=https;For=203.0.113.5"}},
+			want:       "203.0.113.5",
+		},
+		"a Forwarded chain with a made-up first element": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"for=192.0.2.99", "for=203.0.113.5;proto=https, for=10.9.9.9"}},
+			want:       "203.0.113.5",
+		},
+		// A quoted value can hold a comma or a semicolon, which must not start an element or a parameter of its own
+		"a Forwarded value that quotes a separator": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {`for=203.0.113.5;ext="x, for=192.0.2.99"`}},
+			want:       "203.0.113.5",
+		},
+		"an obfuscated Forwarded hop ends the trusted part": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"for=203.0.113.5, for=_hidden"}},
+			want:       "10.1.2.3:5555",
+		},
+		"a Forwarded element without an address ends the trusted part": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"for=203.0.113.5, proto=https"}},
+			want:       "10.1.2.3:5555",
+		},
+		// Most proxies maintain X-Forwarded-For and pass a Forwarded header through as the client sent it
+		"X-Forwarded-For is read over Forwarded": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerXForwardedFor: {"203.0.113.5"}, headerForwarded: {"for=192.0.2.99"}},
+			want:       "203.0.113.5",
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -115,6 +157,7 @@ func TestMiddlewareClientIP(t *testing.T) {
 
 			// Nothing after this middleware can read an address from the headers
 			assert.Empty(t, seen.Header.Values(headerXForwardedFor))
+			assert.Empty(t, seen.Header.Values(headerForwarded))
 			assert.Empty(t, seen.Header.Values(headerXRealIP))
 		})
 	}

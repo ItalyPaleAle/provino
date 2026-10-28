@@ -131,7 +131,7 @@ type ConfigServer struct {
 	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins"`
 
 	// IP addresses or CIDRs of the reverse proxies in front of this service, such as a load balancer or an ingress controller
-	// A request from one of them is logged and traced with the client address its X-Forwarded-For or X-Real-IP header names, and those headers are dropped from any other request, so a client can't make up its own address
+	// A request from one of them is logged and traced with the client address its X-Forwarded-For, Forwarded or X-Real-IP header names, and those headers are dropped from any other request, so a client can't make up its own address
 	TrustedProxies []string `yaml:"trustedProxies"`
 
 	// Maximum time to read a whole request, including its body
@@ -410,8 +410,8 @@ type ConfigImages struct {
 	MaxUploadSize int64 `yaml:"maxUploadSize"`
 
 	// Maximum number of pixels in an uploaded image, after its EXIF orientation is applied
-	// It bounds the memory decoding an image can take, whatever its size in bytes
-	// +default 100_000_000
+	// It bounds the memory decoding an image can take, whatever its size in bytes: at the default, one encode takes up to about 1 GB
+	// +default 50_000_000
 	MaxSourcePixels int64 `yaml:"maxSourcePixels"`
 
 	// Maximum number of variants a single job can ask for
@@ -430,6 +430,7 @@ type ConfigImages struct {
 	// Maximum number of encoding tasks Francis runs on each host at once.
 	// Encoding is CPU- and memory-bound, so this bounds the resources a burst of jobs can consume while allowing excess tasks to move to another host.
 	// Variants are encoded one per thread, so this is the only concurrency knob: libvips itself is configured to use a single thread per operation.
+	// Each encode takes up to about 1 GB of memory for a source of 50 megapixels (the default "images.maxSourcePixels"), and that scales with the pixel count, so the memory available should be at least this many times that.
 	// If empty, defaults to the number of CPUs the process can use, which follows the CPU limit of a container.
 	MaxConcurrentEncodes int `yaml:"maxConcurrentEncodes"`
 

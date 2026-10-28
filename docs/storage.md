@@ -17,7 +17,7 @@ storage:
 
 A `prefix` is applied by the backend to every key, so the keys below, and the keys in a manifest, are always relative to it.
 
-On the local file system, files are written as `0600` and folders as `0750` by default, so only the user provino runs as can read them. To serve the variants straight from the folder with a web server that runs as another user, give them wider permissions in the DSN, in octal, for example `fs:/var/lib/provino/data/variants?fileMode=0644&dirMode=0755`. The modes must keep read and write access for provino's own user, and a `?` in a local DSN always starts these options.
+On the local file system, files are written as `0600` and folders as `0750` by default, so only the user provino runs as can read them. To serve the variants straight from the folder with a web server that runs as another user, give them wider permissions in the DSN, in octal, for example `fs:/var/lib/provino/data/variants?fileMode=0644&dirMode=0755`. The modes must keep read and write access for provino's own user, and a `?` in a local DSN always starts these options. They're given to every file as it's written and to every folder provino creates, whatever the umask, while folders that already exist keep their own: after widening the modes of a store that already holds images, `chmod` its existing folders once.
 
 provino doesn't serve images. Serve the variants from the store, using the keys in the manifest.
 
@@ -71,8 +71,7 @@ Each image has a manifest next to its variants. It's written when the original i
       "fit": "contain",
       "width": 600,
       "height": 400,
-      "size": 38122,
-      "succeeded": true
+      "size": 38122
     }
   ]
 }
@@ -85,7 +84,7 @@ Each image has a manifest next to its variants. It's written when the original i
 | `jobId` | The job that wrote the manifest |
 | `sourceKey` | Key of the original, in the originals store |
 | `sourceWidth`, `sourceHeight` | The original's size after its EXIF orientation |
-| `variants` | Every variant the last job asked for, in the order it asked for them |
+| `variants` | Every variant the last job asked for, in the order it asked for them. Every file listed is in the store |
 | `variants[].key` | Key of the file, in the variants store |
 | `variants[].requestedResolution` | The box that was asked for. `width` and `height` are what the file came out at |
 
@@ -105,10 +104,10 @@ Every such box of one fit and format produces the same file, so only the tightes
 
 ### Changing an image's variants
 
-`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit and format are reused rather than encoded again, whatever encoder settings produced them. Files larger than the original are always encoded again. So sending the whole set costs nothing for the variants that are already there, and the manifest always lists the complete set.
+`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit and format are reused rather than encoded again, whatever encoder settings produced them. So sending the whole set costs nothing for the variants that are already there, and the manifest always lists the complete set.
 
 Variants that drop out of the set stay in the store, because an application may still reference them. Removing objects is left to the operator.
 
 ## Originals and IDs
 
-An image ID is spent by its first upload: an upload whose ID is already stored, in any format, is refused with `409 image_exists`. So is an upload of an ID that another upload is storing at the same time, or that a job is working on. Originals are kept after their jobs complete, because every later optimize request reads them again.
+An image ID is spent by its first upload: an upload whose ID is already stored, in any format, is refused with `409 image_exists`. So is an upload of an ID that another upload is storing at the same time, or that a job is working on. An optimize request for an ID that an upload is still storing is refused with `409 upload_in_progress`, and can be sent again once the upload has returned. Originals are kept after their jobs complete, because every later optimize request reads them again.

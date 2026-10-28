@@ -152,7 +152,7 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 // It queues a job that generates variants for an image already in storage
 //
 //	@Summary		Generate variants for an existing image
-//	@Description	Queues a job for an image that is already stored. Send every variant the image should have, including the ones it already has: stored files that still match are reused, boxes the original can't fill are skipped, and the rest are encoded. The request is validated and queued without touching storage, so an image that doesn't exist makes the job fail with `image_not_found` rather than this request.
+//	@Description	Queues a job for an image that is already stored. Send every variant the image should have, including the ones it already has: stored files that still match are reused, boxes the original can't fill are skipped, and the rest are encoded. The request is validated and queued without touching storage, so an image that doesn't exist makes the job fail with `image_not_found` rather than this request. An image that an upload naming its ID is still storing is refused with `409 upload_in_progress`, and can be sent again once the upload has returned.
 //	@Tags			client
 //	@Accept			json
 //	@Produce		json
@@ -162,6 +162,7 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 //	@Failure		400		{object}	client.Error
 //	@Failure		401		{object}	client.Error
 //	@Failure		403		{object}	client.Error
+//	@Failure		409		{object}	client.Error
 //	@Failure		429		{object}	client.Error
 //	@Router			/v1/client/optimize [post]
 func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
@@ -227,10 +228,14 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 		Notify:       notification,
 		RequestedAt:  time.Now(),
 	})
-	if errors.Is(err, actors.ErrQueueFull) {
+	switch {
+	case errors.Is(err, actors.ErrQueueFull):
 		errQueueFull.WriteResponse(w, r)
 		return
-	} else if err != nil {
+	case errors.Is(err, actors.ErrUploadInProgress):
+		errUploadInProgress.WriteResponse(w, r)
+		return
+	case err != nil:
 		s.respondWithError(w, r, err)
 		return
 	}

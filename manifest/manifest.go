@@ -24,9 +24,8 @@ const (
 	// StatusStored means the original is stored and no job has generated variants for it yet
 	StatusStored Status = "stored"
 	// StatusCompleted means every variant the last successful job asked for is available
+	// A job that fails leaves the manifest it found in place, so no manifest describes a failed job
 	StatusCompleted Status = "completed"
-	// StatusFailed is only found in manifests written before provino/v1: a failed job now leaves the previous manifest in place instead
-	StatusFailed Status = "failed"
 )
 
 // Manifest describes an image: its original, and the variants generated from it
@@ -61,7 +60,7 @@ type Manifest struct {
 	StartedAt   time.Time `json:"startedAt,omitzero"`
 	CompletedAt time.Time `json:"completedAt,omitzero"`
 
-	// Every variant the job asked for, in the order it asked for them
+	// Every variant the job asked for, in the order it asked for them, each of them available
 	Variants []Variant `json:"variants"`
 }
 
@@ -86,10 +85,6 @@ type Variant struct {
 	Height int `json:"height,omitempty"`
 	// Size of the file, in bytes
 	Size int64 `json:"size,omitempty"`
-	// True when the file is available
-	Succeeded bool `json:"succeeded"`
-	// Why the variant couldn't be generated, in manifests written before provino/v1
-	Error string `json:"error,omitempty"`
 	// Skipped marks a box the source can't fill whose pixels a tighter box of the same fit and format already holds, so no file was stored for it
 	// The entry repeats that file's key, width, height and size, so a reader that doesn't know about skipped entries sees a duplicate of that file and drops it
 	Skipped bool `json:"skipped,omitempty"`

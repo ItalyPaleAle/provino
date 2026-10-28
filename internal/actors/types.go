@@ -163,13 +163,12 @@ type SkippedVariant struct {
 }
 
 // VariantResult is the output of one item in the generation fan-out
+// The fan-out fails as soon as one variant does, so a result is only ever recorded for a variant that's available
 type VariantResult struct {
 	// Index of the variant within the job
 	Index int `json:"index"`
 	// Name of the variant
 	Name string `json:"name"`
-	// True once the variant reported back, whether it succeeded or not
-	Done bool `json:"done"`
 	// Size of the encoded variant, in bytes
 	Size int64 `json:"size,omitempty"`
 	// Actual width of the variant, which can be smaller than requested when fitting inside the requested box
@@ -178,19 +177,12 @@ type VariantResult struct {
 	Height int `json:"height,omitempty"`
 	// Time it took to generate the variant, in milliseconds
 	DurationMs int64 `json:"durationMs,omitempty"`
-	// Error that prevented the variant from being generated, if any
-	Error string `json:"error,omitempty"`
 	// When the variant was completed
 	CompletedAt time.Time `json:"completedAt"`
 	// Reused preserves the metadata of an existing stored object that was not regenerated
 	Reused *manifest.Variant `json:"reused,omitempty"`
 	// Skipped is set when nothing was encoded because another variant holds this box's pixels
 	Skipped *SkippedVariant `json:"skipped,omitempty"`
-}
-
-// Succeeded returns true if the variant was generated
-func (r VariantResult) Succeeded() bool {
-	return r.Done && r.Error == ""
 }
 
 // JobStatus is the read-only view of a job's progress

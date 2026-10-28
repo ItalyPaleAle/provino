@@ -225,12 +225,13 @@ func (s *Server) initAppServer() (err error) {
 		httpserver.MiddlewareMaxBodySize(cfg.Images.MaxUploadSize+(1<<20)),
 	)
 
-	// A 401 is logged with its reason by the authentication middleware, and the root path answers 404 to every crawler and browser that tries it, so neither is worth a line of its own
+	// A 401 is logged with its reason by the authentication middleware, so it isn't worth a line of its own
+	// The root path and the favicon answer 404 to every crawler and browser that tries them, which is noise rather than a client error
 	// Every other 404 is logged, since it's how a client calling the wrong path or polling an expired job shows up
 	filters := []sloghttp.Filter{
 		sloghttp.IgnoreStatus(http.StatusUnauthorized),
 		func(w sloghttp.WrapResponseWriter, r *http.Request) bool {
-			return r.URL.Path != "/"
+			return r.URL.Path != "/" && r.URL.Path != "/favicon.ico"
 		},
 	}
 	if cfg.Logs.OmitHealthChecks {

@@ -117,8 +117,8 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	now := time.Now()
 	snap := jobSnapshot{SourceFormat: "png", SourceName: "source.png", SourceSize: 999, StartedAt: now}
 	results := []VariantResult{
-		{Index: 0, Done: true, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
-		{Index: 1, Done: true, CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},
+		{Index: 0, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
+		{Index: 1, CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},
 	}
 
 	m, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{Width: 800, Height: 800}, results)
@@ -137,10 +137,10 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	assert.Nil(t, holder.SkippedFor)
 	assert.Equal(t, "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_800x800.webp", holder.Key)
 
-	// The skipped entry is satisfied and repeats the holder's file, key included, so a reader that ignores skipped sees a duplicate it drops
+	// The skipped entry repeats the holder's file, key included, so a reader that ignores skipped sees a duplicate it drops
 	skipped := m.Variants[1]
-	assert.True(t, skipped.Succeeded)
 	assert.True(t, skipped.Skipped)
+	assert.Equal(t, holder.Key, skipped.Key)
 	assert.Equal(t, &imaging.Resolution{Width: 1000, Height: 1000}, skipped.SkippedFor)
 	assert.Equal(t, "2000x2000.webp", skipped.Name)
 	assert.Equal(t, imaging.Resolution{Width: 2000, Height: 2000}, skipped.Resolution)
@@ -151,8 +151,8 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 
 	t.Run("a skip pointing at another skipped variant is rejected", func(t *testing.T) {
 		broken := []VariantResult{
-			{Index: 0, Done: true, Skipped: &SkippedVariant{Index: 1}},
-			{Index: 1, Done: true, Skipped: &SkippedVariant{Index: 0}},
+			{Index: 0, Skipped: &SkippedVariant{Index: 1}},
+			{Index: 1, Skipped: &SkippedVariant{Index: 0}},
 		}
 		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "doesn't hold a file")
@@ -165,8 +165,8 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 			{Name: "600xauto.webp", Format: imaging.FormatWebP, Quality: 20, Effort: 5, Resolution: imaging.Resolution{Width: 600}, Fit: imaging.FitContain},
 		}
 		conflicting := []VariantResult{
-			{Index: 0, Done: true, Width: 600, Height: 400, Size: 3000, CompletedAt: now},
-			{Index: 1, Done: true, Width: 600, Height: 400, Size: 1000, CompletedAt: now},
+			{Index: 0, Width: 600, Height: 400, Size: 3000, CompletedAt: now},
+			{Index: 1, Width: 600, Height: 400, Size: 1000, CompletedAt: now},
 		}
 		_, err := buildManifest(imagekeys.New(), shared, snap, imaging.Resolution{Width: 1500, Height: 1000}, conflicting)
 		require.ErrorContains(t, err, "both come out as the 600x400.webp file")
@@ -178,7 +178,7 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	})
 
 	t.Run("a skip pointing outside the job is rejected", func(t *testing.T) {
-		broken := []VariantResult{results[0], {Index: 1, Done: true, Skipped: &SkippedVariant{Index: 7}}}
+		broken := []VariantResult{results[0], {Index: 1, Skipped: &SkippedVariant{Index: 7}}}
 		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})

@@ -117,7 +117,7 @@ func previousManifest(imageID uuid.UUID) manifest.Manifest {
 		SourceFormat: "png",
 		Variants: []manifest.Variant{{
 			Name: "100x100.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 100, Height: 100},
-			Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9, Succeeded: true,
+			Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9,
 		}},
 	}
 }
@@ -137,7 +137,7 @@ func TestCompensations(t *testing.T) {
 		compensation := testCompensation{
 			step:    stepGenerate,
 			item:    task(webpSpec("200x200.webp", 200, 200)),
-			result:  VariantResult{Width: 200, Height: 150, Done: true},
+			result:  VariantResult{Width: 200, Height: 150},
 			outputs: map[string]any{stepSnapshot: jobSnapshot{}},
 		}
 		err = handlers.deleteVariant(t.Context(), compensation)
@@ -150,14 +150,14 @@ func TestCompensations(t *testing.T) {
 	})
 
 	t.Run("a reused variant is kept", func(t *testing.T) {
-		entry := manifest.Variant{Format: imaging.FormatWebP, Width: 100, Height: 75, Size: 9, Succeeded: true}
+		entry := manifest.Variant{Format: imaging.FormatWebP, Width: 100, Height: 75, Size: 9}
 		err := imageStore.SaveVariant(t.Context(), testNamespace, imageID, 100, 75, "webp", []byte("old"), "image/webp")
 		require.NoError(t, err)
 
 		err = handlers.deleteVariant(t.Context(), testCompensation{
 			step:    stepGenerate,
 			item:    task(webpSpec("100x100.webp", 100, 100)),
-			result:  VariantResult{Width: 100, Height: 75, Done: true, Reused: &entry},
+			result:  VariantResult{Width: 100, Height: 75, Reused: &entry},
 			outputs: map[string]any{stepSnapshot: jobSnapshot{}},
 		})
 		require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestCompensations(t *testing.T) {
 		err = handlers.deleteVariant(t.Context(), testCompensation{
 			step:    stepGenerate,
 			item:    task(webpSpec("100x100.webp", 100, 100)),
-			result:  VariantResult{Width: 100, Height: 75, Done: true},
+			result:  VariantResult{Width: 100, Height: 75},
 			outputs: map[string]any{stepSnapshot: jobSnapshot{Previous: previous}},
 		})
 		require.NoError(t, err)
@@ -224,21 +224,19 @@ func TestCompensations(t *testing.T) {
 func TestReusableVariantsRequiresTheManifestEntryAndStoredObject(t *testing.T) {
 	imageStore := newTestStore(t)
 	imageID := uuid.NewV4()
-	existing := manifest.Variant{Name: "100x100.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 100, Height: 100}, Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9, Succeeded: true}
-	missing := manifest.Variant{Name: "200x200.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 200, Height: 200}, Fit: imaging.FitContain, Width: 200, Height: 150, Size: 7, Succeeded: true}
-	// Stored before provino stopped enlarging, so it's larger than the 800x600 source
-	enlarged := manifest.Variant{Name: "1000x1000.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain, Width: 1000, Height: 750, Size: 11, Succeeded: true}
+	existing := manifest.Variant{Name: "100x100.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 100, Height: 100}, Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9}
+	missing := manifest.Variant{Name: "200x200.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 200, Height: 200}, Fit: imaging.FitContain, Width: 200, Height: 150, Size: 7}
 	// A skipped entry repeats another entry's file, so it never stands for a file of its own
-	skipped := manifest.Variant{Name: "300x300.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 300, Height: 300}, Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9, Succeeded: true, Skipped: true, SkippedFor: &imaging.Resolution{Width: 100, Height: 100}}
-	for _, entry := range []manifest.Variant{existing, enlarged} {
+	skipped := manifest.Variant{Name: "300x300.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 300, Height: 300}, Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9, Skipped: true, SkippedFor: &imaging.Resolution{Width: 100, Height: 100}}
+	for _, entry := range []manifest.Variant{existing} {
 		err := imageStore.SaveVariant(t.Context(), testNamespace, imageID, entry.Width, entry.Height, entry.Format.Extension(), []byte("variant"), entry.Format.ContentType())
 		require.NoError(t, err)
 	}
-	previous := manifest.Manifest{Version: manifest.Version, Namespace: testNamespace, ImageID: imageID.String(), Status: manifest.StatusCompleted, SourceFormat: "png", Variants: []manifest.Variant{existing, missing, enlarged, skipped}}
+	previous := manifest.Manifest{Version: manifest.Version, Namespace: testNamespace, ImageID: imageID.String(), Status: manifest.StatusCompleted, SourceFormat: "png", Variants: []manifest.Variant{existing, missing, skipped}}
 
 	source := imaging.Resolution{Width: 800, Height: 600}
 	handlers := &jobWorkflowHandlers{runtime: &Runtime{Store: imageStore, Log: slog.New(slog.DiscardHandler)}}
-	stored, err := handlers.reusableVariants(t.Context(), testNamespace, imageID, &previous, source)
+	stored, err := handlers.reusableVariants(t.Context(), testNamespace, imageID, &previous)
 	require.NoError(t, err)
 	assert.Equal(t, map[variantIdentity]manifest.Variant{
 		{Format: existing.Format, Fit: imaging.FitContain, Width: existing.Resolution.Width, Height: existing.Resolution.Height}: existing,
@@ -267,7 +265,7 @@ func TestReusableVariantsRequiresTheManifestEntryAndStoredObject(t *testing.T) {
 // A box the source can't fill finds the full-resolution file another box stored, because that file holds the same pixels
 func TestStoredVariantsLookupFindsTheFullResolutionFileOfAnotherBox(t *testing.T) {
 	source := imaging.Resolution{Width: 1200, Height: 800}
-	full := manifest.Variant{Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 1400, Height: 1400}, Fit: imaging.FitContain, Width: 1200, Height: 800, Size: 42, Succeeded: true}
+	full := manifest.Variant{Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 1400, Height: 1400}, Fit: imaging.FitContain, Width: 1200, Height: 800, Size: 42}
 	stored := storedVariants{
 		byBox:    map[variantIdentity]manifest.Variant{{Format: imaging.FormatWebP, Fit: imaging.FitContain, Width: 1400, Height: 1400}: full},
 		byOutput: map[variantIdentity]manifest.Variant{{Format: imaging.FormatWebP, Fit: imaging.FitContain, Width: 1200, Height: 800}: full},
@@ -584,7 +582,6 @@ func TestJobGeneratesEveryVariant(t *testing.T) {
 
 	for i, entry := range m.Variants {
 		assert.Equal(t, variants[i].Name, entry.Name)
-		assert.True(t, entry.Succeeded, "variant %s failed: %s", entry.Name, entry.Error)
 		assert.Equal(t, host.store.AssetKey(testNamespace, imageID, entry.Width, entry.Height, entry.Format.Extension()), entry.Key)
 
 		// Every key in the manifest resolves to a stored file of the recorded size
@@ -884,6 +881,57 @@ func TestImageActorStartsAnActiveJobThatNeverStarted(t *testing.T) {
 	assert.Equal(t, jobID, m.JobID)
 }
 
+// A job whose journal the retention in effect when it became active could have purged is freed rather than run again, even after the retention was raised
+func TestImageActorFreesAJobWhoseJournalCouldBePurged(t *testing.T) {
+	host := startTestHost(t, testHostOptions{configure: func(c *config.Config) {
+		c.Actors.CompletedWorkflowRetention = 24 * time.Hour
+	}})
+
+	imageID := uuid.NewV4()
+	source := host.upload(t, imageID, 800, 600)
+	staleID := uuid.NewV7().String()
+	request := JobRequest{JobID: staleID, Namespace: testNamespace, ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, RequestedAt: time.Now()}
+
+	// The job became active two hours ago, when the retention was an hour, and its start was never confirmed
+	err := host.host.SetState(t.Context(), imageActorType, imageActorID(testNamespace, imageID.String()), imageState{
+		Active: &activeJob{JobID: staleID, StartedAt: time.Now().Add(-2 * time.Hour), Request: &request, Retention: time.Hour},
+	}, nil)
+	require.NoError(t, err)
+
+	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}})
+	host.waitForJob(t, imageID, jobID, StatusCompleted)
+
+	// The stale job never ran, so it has no status and the manifest is the new job's
+	_, _, found, err := host.Jobs().Status(t.Context(), testNamespace, imageID.String(), staleID)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Equal(t, jobID, host.manifest(t, imageID).JobID)
+}
+
+func TestImageActorCouldBePurged(t *testing.T) {
+	now := time.Now()
+	startedAt := now.Add(-2 * time.Hour)
+	tests := map[string]struct {
+		current  time.Duration
+		recorded time.Duration
+		want     bool
+	}{
+		"within the retention":                          {current: 24 * time.Hour, recorded: 24 * time.Hour, want: false},
+		"past the retention":                            {current: time.Hour, recorded: time.Hour, want: true},
+		"raised after the job became active":            {current: 24 * time.Hour, recorded: time.Hour, want: true},
+		"lowered after the job became active":           {current: time.Hour, recorded: 24 * time.Hour, want: true},
+		"indefinite now, but not when it became active": {current: 0, recorded: time.Hour, want: true},
+		"indefinite when it became active":              {current: time.Hour, recorded: 0, want: true},
+		"indefinite throughout":                         {current: 0, recorded: 0, want: false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			a := &imageActor{runtime: &Runtime{CompletedWorkflowRetention: tt.current}}
+			assert.Equal(t, tt.want, a.couldBePurged(&activeJob{StartedAt: startedAt, Retention: tt.recorded}, now))
+		})
+	}
+}
+
 func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *testing.T) {
 	host := startTestHost(t, testHostOptions{})
 
@@ -967,7 +1015,7 @@ func TestRegenerationReplacesEnlargedFiles(t *testing.T) {
 	err = host.store.WriteManifest(t.Context(), testNamespace, imageID, manifest.Manifest{
 		Version: manifest.Version, Namespace: testNamespace, ImageID: imageID.String(), Status: manifest.StatusCompleted,
 		SourceFormat: "png", SourceWidth: 800, SourceHeight: 800,
-		Variants: []manifest.Variant{{Name: "1000x1000.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain, Width: 1000, Height: 1000, Size: int64(len("enlarged")), Succeeded: true}},
+		Variants: []manifest.Variant{{Name: "1000x1000.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain, Width: 1000, Height: 1000, Size: int64(len("enlarged"))}},
 	})
 	require.NoError(t, err)
 
@@ -1127,6 +1175,42 @@ func TestImageIDClaimsWaitForTheImageJobs(t *testing.T) {
 
 	close(unblock)
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
+}
+
+// An image an upload is still storing has no original yet, so a job that isn't the upload's own waits until the upload has queued it
+func TestJobsWaitForAnUploadInProgress(t *testing.T) {
+	host := startTestHost(t, testHostOptions{})
+	jobs := host.Jobs()
+	imageID := uuid.NewV4()
+
+	claimed, err := jobs.ClaimUpload(t.Context(), testNamespace, imageID.String(), "upload", time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	// The original isn't stored yet, so an optimize job would only fail with image_not_found
+	optimize := JobRequest{Namespace: testNamespace, ImageID: imageID.String(), SourceFormat: "png", Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}, RequestedAt: time.Now()}
+	_, err = jobs.Enqueue(t.Context(), optimize)
+	require.ErrorIs(t, err, ErrUploadInProgress)
+
+	// The upload's own job is accepted while it holds the claim, and a job sent after it waits behind it
+	source := host.upload(t, imageID, 400, 300)
+	uploadJob := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	optimizeJob := host.enqueue(t, optimize)
+
+	err = jobs.ReleaseUpload(t.Context(), testNamespace, imageID.String(), "upload")
+	require.NoError(t, err)
+	host.waitForJob(t, imageID, uploadJob, StatusCompleted)
+	host.waitForJob(t, imageID, optimizeJob, StatusCompleted)
+
+	// A claim that expired no longer holds anything back
+	otherID := uuid.NewV4()
+	claimed, err = jobs.ClaimUpload(t.Context(), testNamespace, otherID.String(), "abandoned", 50*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	time.Sleep(100 * time.Millisecond)
+	optimize.ImageID = otherID.String()
+	_, err = jobs.Enqueue(t.Context(), optimize)
+	require.NoError(t, err)
 }
 
 func TestHostRateLimiter(t *testing.T) {

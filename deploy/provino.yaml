@@ -133,13 +133,15 @@ spec:
         timeoutSeconds: 5
         failureThreshold: 3
       # Encoding is what consumes the memory here, and `images.maxConcurrentEncodes` is what bounds how much of it happens at once
-      # These are a starting point for one small instance rather than a measured figure
+      # Left unset, it follows the CPU limit, so this instance encodes two variants at once, and each can take up to about 1 GB at the default `images.maxSourcePixels`
+      # Raise both limits together: see "Memory" in docs/deploying.md
       resources:
         requests:
           cpu: 250m
           memory: 256Mi
         limits:
-          memory: 1Gi
+          cpu: "2"
+          memory: 2Gi
   volumes:
     - name: config
       secret:
