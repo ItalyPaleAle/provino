@@ -189,6 +189,7 @@ securityContext:
 
 # Encoding is what consumes the memory, and config.images.maxConcurrentEncodes is what bounds how much of it happens at once
 # When that is unset it follows the CPU limit, so setting one also bounds the memory a burst of jobs takes
+# Allow about 1 GB of memory for each variant encoded at once, at the default config.images.maxSourcePixels: see "Memory" in docs/deploying.md
 resources: {}
   # limits:
   #   cpu: "2"

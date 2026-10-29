@@ -86,9 +86,11 @@ Only `/v1/public/*` answers cross-origin requests.
 
 Uploads are rate-limited per caller, by a token bucket keyed on the subject of the caller's token. The defaults admit ten uploads a minute, with a burst of thirty, which lets a user drop a folder of photos in at once. Tune them with `rateLimit.rate`, `rateLimit.per` and `rateLimit.burst`.
 
-When the service runs behind a load balancer or a reverse proxy, list the addresses it connects from in `server.trustedProxies`. The request log and the traces then record the client each request was forwarded for, read from `X-Forwarded-For` or `X-Real-IP`, rather than the proxy. Those headers are dropped from every other request, so a client can't put an address of its choosing in the logs.
+When the service runs behind a load balancer or a reverse proxy, list the addresses it connects from in `server.trustedProxies`. The request log and the traces then record the client each request was forwarded for, rather than the proxy. It's read from `X-Forwarded-For`, from the standard `Forwarded` header when a request doesn't carry `X-Forwarded-For`, or from `X-Real-IP`. Those headers are dropped from every other request, so a client can't put an address of its choosing in the logs.
 
-An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, and may be up to `images.maxUploadSize` (32 MiB by default) and `images.maxSourcePixels` (100 megapixels by default).
+A proxy appends to the header it maintains and passes the others through as the client sent them. If yours maintains `Forwarded` only, have it drop `X-Forwarded-For` from incoming requests, or a client could name an address of its choosing there.
+
+An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, and may be up to `images.maxUploadSize` (32 MiB by default) and `images.maxSourcePixels` (50 megapixels by default).
 
 ## The actor runtime
 
@@ -119,9 +121,20 @@ The address is the one other hosts dial, so each instance needs its own. When th
 
 | Setting | Default | What it bounds |
 | --- | --- | --- |
-| `images.maxConcurrentEncodes` | The number of CPUs the process can use, which follows a container's CPU limit | How many variants a host encodes at once. libvips runs one thread per operation, so this is the only concurrency setting. Work beyond it waits, or moves to another host |
+| `images.maxConcurrentEncodes` | The number of CPUs the process can use, which follows a container's CPU limit | How many variants a host encodes at once, and so how much memory it needs: see [Memory](#memory). libvips runs one thread per operation, so this is the only concurrency setting. Work beyond it waits, or moves to another host |
 | `images.maxQueuedJobs` | 10 | How many jobs can wait for one image while another of its jobs runs. Beyond it, requests get `429 queue_full` |
 | `actors.workflowTimeout` | 10 minutes | How long one attempt at a step may run. Six times that is a job's deadline |
+
+### Memory
+
+Memory is what usually runs out first, and it's `images.maxConcurrentEncodes` that bounds it: each encode holds one variant's work, and how much that takes depends on the source.
+
+- JPEG, PNG and WebP sources are resized as they're decoded, without ever holding the full-size image, so the variant's size decides. Variants up to 2560 pixels wide take 50 to 250 MB each, and one close to the source's full size takes up to about 900 MB.
+- AVIF and HEIC sources are decoded at full size whatever the variant, which takes about 800 MB for a 50-megapixel source.
+
+These figures are for the 50-megapixel default of `images.maxSourcePixels`, and they scale with it. The rest of the process takes about 100 MB.
+
+So give each host about 1 GB for every encode it runs at once, plus that 100 MB: with the default `images.maxConcurrentEncodes`, which is one per CPU, a 4-CPU host needs about 4 GB. When the hosts have less memory than that, set `images.maxConcurrentEncodes` lower, or lower `images.maxSourcePixels`. If the uploads are JPEG, PNG and WebP photos and the variants are web-sized, a quarter of that is enough: a job of eight WebP and AVIF variants up to 2560 pixels wide, with four encodes at once, peaked at about 520 MB for a 50-megapixel JPEG and 700 MB for a WebP.
 
 ### Status retention
 

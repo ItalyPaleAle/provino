@@ -48,6 +48,8 @@ The `provino-data` volume holds everything the service persists: the uploaded or
 
 To start over from nothing, `docker compose down --volumes` removes both.
 
+The service isn't given a memory limit. If you add one, allow about 1 GB for each variant it encodes at once, which is one per CPU unless `images.maxConcurrentEncodes` says otherwise: see [Memory](../docs/deploying.md#memory).
+
 ### Editing the configuration
 
 Edit `compose.config.yaml` and recreate the container with `docker compose up -d --force-recreate`, which mounts the file afresh: an editor that saves by replacing the file leaves a running container with the old copy. The same advice as for the Podman pod [below](#changing-the-configuration) applies: replace the example values, and see [deploying](../docs/deploying.md) for the rest.
@@ -102,6 +104,8 @@ One volume holds everything the service persists: the uploaded originals, the ge
 `/tmp` is a separate `emptyDir`, backed by disk rather than by memory so that a burst of uploads doesn't come out of the container's memory limit. It holds the source cache: each running job keeps a copy of the original its variants are encoded from, and an upload leaves one there as it streams in. Uploads to S3 or Vercel Blob are also spooled through `/tmp`, while the file system storage configured above writes its temporary files inside the data volume instead.
 
 Nothing in `/tmp` has to survive a restart. Its 1Gi limit covers several concurrent jobs and uploads of `images.maxUploadSize`.
+
+The container is limited to 2 CPUs and 2Gi of memory. `images.maxConcurrentEncodes` follows the CPU limit when it's unset, so the pod encodes two variants at once, and each can take up to about 1 GB: raise the two limits together, as [Memory](../docs/deploying.md#memory) explains.
 
 If the container fails to start with a permission error on `/var/lib/provino/data`, the volume was created before the pod claimed it and is owned by the wrong uid. Podman chowns a volume it creates empty, so removing it and letting the unit recreate it is usually enough:
 

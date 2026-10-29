@@ -35,7 +35,6 @@ func TestParse(t *testing.T) {
 				Width:      600,
 				Height:     400,
 				Size:       38122,
-				Succeeded:  true,
 			}},
 		}
 		data, err := json.Marshal(original)

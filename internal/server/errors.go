@@ -27,6 +27,7 @@ var (
 	errInvalidFormat    = httpserver.NewApiError("invalid_source_format", http.StatusBadRequest, "Invalid source format")
 
 	errImageExists       = httpserver.NewApiError("image_exists", http.StatusConflict, "An image with this ID is already stored, or being stored")
+	errUploadInProgress  = httpserver.NewApiError("upload_in_progress", http.StatusConflict, "The image is still being uploaded")
 	errImageTooLarge     = httpserver.NewApiError("image_too_large", http.StatusRequestEntityTooLarge, "Uploaded image is larger than allowed")
 	errUnsupportedFormat = httpserver.NewApiError("unsupported_format", http.StatusUnsupportedMediaType, "Uploaded file is not an image in an accepted format")
 	errUnreadableImage   = httpserver.NewApiError("unreadable_image", http.StatusUnsupportedMediaType, "Uploaded image cannot be decoded")

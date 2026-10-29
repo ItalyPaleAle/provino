@@ -12,12 +12,13 @@ import (
 // Headers a reverse proxy names the client of a request in
 const (
 	headerXForwardedFor = "X-Forwarded-For"
+	headerForwarded     = "Forwarded"
 	headerXRealIP       = "X-Real-IP"
 )
 
 // middlewareClientIP makes the request's remote address the client's own, which is what the request log and the traces record
 //
-// A request from a trusted proxy names its client in X-Forwarded-For or X-Real-IP, and its remote address becomes that client's
+// A request from a trusted proxy names its client in X-Forwarded-For, Forwarded or X-Real-IP, and its remote address becomes that client's
 // The forwarding headers are dropped from every request afterwards: the tracing middleware would otherwise report the first X-Forwarded-For entry as the client, which a client can set to anything it likes
 func middlewareClientIP(trustedProxies []netip.Prefix) httpserver.Middleware {
 	return func(next http.Handler) http.Handler {
@@ -27,6 +28,7 @@ func middlewareClientIP(trustedProxies []netip.Prefix) httpserver.Middleware {
 				r.RemoteAddr = formatAddr(client)
 			}
 			r.Header.Del(headerXForwardedFor)
+			r.Header.Del(headerForwarded)
 			r.Header.Del(headerXRealIP)
 
 			next.ServeHTTP(w, r)
@@ -45,8 +47,7 @@ func forwardedClient(r *http.Request, trustedProxies []netip.Prefix) (netip.Addr
 	// Every proxy appends the address it received the request from, so the list is read from the end, past the trusted proxies, and the first address that isn't one is the client
 	// The entries before it were written by the client or by proxies nobody trusts, so they're never read
 	var outermost netip.Addr
-	entries := strings.Split(strings.Join(r.Header.Values(headerXForwardedFor), ","), ",")
-	for _, entry := range slices.Backward(entries) {
+	for _, entry := range slices.Backward(forwardedHops(r.Header)) {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -73,6 +74,90 @@ func forwardedClient(r *http.Request, trustedProxies []netip.Prefix) (netip.Addr
 		return outermost, true
 	}
 	return netip.Addr{}, false
+}
+
+// Read the hops a request was forwarded through, nearest last
+//
+// X-Forwarded-For is read when the request carries it, and Forwarded only otherwise, so only one list is ever trusted
+// A proxy appends to the list it maintains and passes any other through as the client sent it, and X-Forwarded-For is the one most proxies maintain
+func forwardedHops(header http.Header) []string {
+	values := header.Values(headerXForwardedFor)
+	if len(values) > 0 {
+		return strings.Split(strings.Join(values, ","), ",")
+	}
+	return forwardedFor(header.Values(headerForwarded))
+}
+
+// Read the "for" parameter of every element of the Forwarded header, as RFC 7239 defines it: `for=192.0.2.60;proto=https, for="[2001:db8::17]:4711"`
+// An element that names no address gives "unknown", like the obfuscated names a proxy may write instead of one, so it ends what can be trusted just like a malformed entry
+func forwardedFor(values []string) []string {
+	var hops []string
+	for _, value := range values {
+		for _, element := range splitUnquoted(value, ',') {
+			element = strings.TrimSpace(element)
+			if element == "" {
+				continue
+			}
+
+			hop := "unknown"
+			for _, pair := range splitUnquoted(element, ';') {
+				key, val, found := strings.Cut(pair, "=")
+				if found && strings.EqualFold(strings.TrimSpace(key), "for") {
+					hop = unquote(strings.TrimSpace(val))
+					break
+				}
+			}
+			hops = append(hops, hop)
+		}
+	}
+	return hops
+}
+
+// Split a header value on a separator that isn't inside a quoted string, so a quoted value can't add elements of its own
+func splitUnquoted(value string, sep byte) []string {
+	var (
+		parts    []string
+		start    int
+		quoted   bool
+		escaping bool
+	)
+	for i := range len(value) {
+		c := value[i]
+		switch {
+		case escaping:
+			escaping = false
+		case quoted && c == '\\':
+			escaping = true
+		case c == '"':
+			quoted = !quoted
+		case !quoted && c == sep:
+			parts = append(parts, value[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, value[start:])
+}
+
+// Remove the quotes around a quoted string and the backslashes that escape characters within it
+func unquote(value string) string {
+	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+		return value
+	}
+
+	value = value[1 : len(value)-1]
+	var b strings.Builder
+	b.Grow(len(value))
+	escaping := false
+	for i := range len(value) {
+		c := value[i]
+		if c == '\\' && !escaping {
+			escaping = true
+			continue
+		}
+		escaping = false
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // Parse an address with or without a port, as a remote address or a forwarding header carries it

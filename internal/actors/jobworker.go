@@ -48,7 +48,6 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	result := VariantResult{
 		Index: task.Spec.Index,
 		Name:  task.Spec.Name,
-		Done:  true,
 	}
 	// A box the source can't fill, whose pixels another variant of this job holds, encodes nothing: the manifest repeats the holder's file for it
 	if task.Skip != nil {
@@ -81,17 +80,16 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	res, kept, err := w.encode(ctx, task)
 	duration := time.Since(start)
 
-	result.DurationMs = duration.Milliseconds()
-	result.CompletedAt = time.Now()
-
 	if err != nil {
-		result.Error = err.Error()
 		if w.runtime.Metrics != nil {
 			w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), false, duration)
 		}
 		log.ErrorContext(ctx, "Failed to generate variant", slog.Any("error", err))
-		return result, fmt.Errorf("failed to generate variant '%s': %w", task.Spec.Name, err)
+		return VariantResult{}, fmt.Errorf("failed to generate variant '%s': %w", task.Spec.Name, err)
 	}
+
+	result.DurationMs = duration.Milliseconds()
+	result.CompletedAt = time.Now()
 
 	// The encode came out as a file another variant reuses with the same settings, so that stored file describes this variant too
 	if kept != nil {

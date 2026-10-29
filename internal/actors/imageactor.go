@@ -70,6 +70,9 @@ type activeJob struct {
 	StartedAt   time.Time `json:"startedAt"`
 	// The job's request, kept until its workflow is known to exist, so a start that never happened can be made again
 	Request *JobRequest `json:"request,omitempty"`
+	// How long finished journals were retained when the job became active, zero for indefinitely
+	// The retention can change across restarts, and the journal could have been purged under either value, so heal goes by the shorter of this one and the current one
+	Retention time.Duration `json:"retention,omitempty"`
 }
 
 type queuedJob struct {
@@ -92,6 +95,8 @@ type enqueueResult struct {
 	Position int `json:"position"`
 	// True when the queue was full and the job wasn't accepted
 	QueueFull bool `json:"queueFull,omitempty"`
+	// True when an upload is still storing the image, so a job that reads the original wasn't accepted
+	UploadInProgress bool `json:"uploadInProgress,omitempty"`
 }
 
 // finishedRequest tells the actor a job's workflow has finished
@@ -259,6 +264,17 @@ func (a *imageActor) enqueue(ctx context.Context, req JobRequest) (enqueueResult
 		return enqueueResult{}, err
 	}
 
+	// An upload holding the ID with no job of its own queued yet is still storing the original, so a job that isn't that upload's would start before the original exists and fail
+	// The upload's own job is the one that carries what it learned about the original, and once it's queued, any later job waits behind it
+	uploading := state.Upload != nil && time.Now().Before(state.Upload.ExpiresAt) && state.Active == nil && len(state.Queue) == 0
+	if uploading && req.Source == nil {
+		err = a.save(ctx, &state)
+		if err != nil {
+			return enqueueResult{}, err
+		}
+		return enqueueResult{UploadInProgress: true}, nil
+	}
+
 	if len(state.Queue) >= a.runtime.MaxQueuedJobs {
 		err = a.save(ctx, &state)
 		if err != nil {
@@ -419,8 +435,14 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) error {
 
 // Report whether the journal of an active job's workflow could have been purged by now
 // It can only be purged once the retention has passed after the workflow completed, which is after the job became active
+//
+// The retention may have changed since the job became active, so the shorter of the two values counts: raising it doesn't bring back a journal the old value already purged
+// A zero retention keeps journals indefinitely, so it never counts as the shorter one; the job recorded zero too when it became active before the retention was recorded at all
 func (a *imageActor) couldBePurged(active *activeJob, now time.Time) bool {
 	retention := a.runtime.CompletedWorkflowRetention
+	if active.Retention > 0 && (retention <= 0 || active.Retention < retention) {
+		retention = active.Retention
+	}
 	return retention > 0 && now.Sub(active.StartedAt) >= retention
 }
 
@@ -456,7 +478,7 @@ func (a *imageActor) startNext(ctx context.Context, state *imageState) error {
 	next := state.Queue[0]
 	state.Queue = state.Queue[1:]
 	request := next.Request
-	state.Active = &activeJob{JobID: next.JobID, SubjectHash: next.SubjectHash, StartedAt: time.Now(), Request: &request}
+	state.Active = &activeJob{JobID: next.JobID, SubjectHash: next.SubjectHash, StartedAt: time.Now(), Request: &request, Retention: a.runtime.CompletedWorkflowRetention}
 	err = a.client.SetState(ctx, *state, nil)
 	if err != nil {
 		state.Queue = append([]queuedJob{next}, state.Queue...)

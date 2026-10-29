@@ -72,7 +72,7 @@ func GetDefaultConfig() *Config {
 		},
 		Images: ConfigImages{
 			MaxUploadSize:      32 << 20, // 32MB
-			MaxSourcePixels:    100_000_000,
+			MaxSourcePixels:    50_000_000,
 			MaxVariants:        48,
 			MaxResolution:      8192,
 			MaxQueuedJobs:      10,

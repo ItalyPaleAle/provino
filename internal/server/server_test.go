@@ -461,6 +461,7 @@ func TestRequestLog(t *testing.T) {
 	}
 
 	assert.Empty(t, logged(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)), "the root path is not logged")
+	assert.Empty(t, logged(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/favicon.ico", nil)), "the favicon is not logged")
 	assert.Empty(t, logged(t, newRequest(t, http.MethodPost, "/v1/client/optimize", "", nil, "")), "a 401 is not logged")
 
 	// A path no route matches is logged, with the client a trusted proxy names
@@ -961,6 +962,11 @@ func TestOptimize(t *testing.T) {
 			request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}},
 			prepare: func(ts *testServer) { ts.jobs.enqueueErr = actors.ErrQueueFull },
 			status:  http.StatusTooManyRequests, code: "queue_full",
+		},
+		"an image still being uploaded": {
+			request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}},
+			prepare: func(ts *testServer) { ts.jobs.enqueueErr = actors.ErrUploadInProgress },
+			status:  http.StatusConflict, code: "upload_in_progress",
 		},
 	}
 	for name, tt := range failures {

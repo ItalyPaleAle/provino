@@ -217,7 +217,7 @@ func (w *jobWorkflowHandlers) prepare(ctx context.Context, task francisworkflow.
 	}
 
 	previous := w.parsePrevious(ctx, snap.Previous, namespace, imageID)
-	stored, err := w.reusableVariants(ctx, namespace, imageID, previous, source)
+	stored, err := w.reusableVariants(ctx, namespace, imageID, previous)
 	if err != nil {
 		return nil, fmt.Errorf("failed to inspect existing variants: %w", err)
 	}
@@ -317,8 +317,8 @@ func (w *jobWorkflowHandlers) sourceSize(ctx context.Context, namespace string, 
 	return size, nil
 }
 
-// Index the files of the previous manifest that still exist and are no larger than the source, which are the ones this job may reuse
-func (w *jobWorkflowHandlers) reusableVariants(ctx context.Context, namespace string, imageID uuid.UUID, previous *manifest.Manifest, source imaging.Resolution) (storedVariants, error) {
+// Index the files of the previous manifest that still exist, which are the ones this job may reuse
+func (w *jobWorkflowHandlers) reusableVariants(ctx context.Context, namespace string, imageID uuid.UUID, previous *manifest.Manifest) (storedVariants, error) {
 	stored := storedVariants{
 		byBox:    make(map[variantIdentity]manifest.Variant),
 		byOutput: make(map[variantIdentity]manifest.Variant),
@@ -329,12 +329,7 @@ func (w *jobWorkflowHandlers) reusableVariants(ctx context.Context, namespace st
 
 	for _, entry := range previous.Variants {
 		// A skipped entry repeats the file of another entry rather than owning one
-		if entry.Skipped || !entry.Succeeded || entry.Width <= 0 || entry.Height <= 0 || entry.Size <= 0 || (entry.Resolution.Width <= 0 && entry.Resolution.Height <= 0) {
-			continue
-		}
-
-		// A file larger than its source was enlarged before provino stopped doing that, so it's encoded again at the source's own size
-		if entry.Width > source.Width || entry.Height > source.Height {
+		if entry.Skipped || entry.Width <= 0 || entry.Height <= 0 || entry.Size <= 0 || (entry.Resolution.Width <= 0 && entry.Resolution.Height <= 0) {
 			continue
 		}
 
@@ -471,9 +466,6 @@ func (w *jobWorkflowHandlers) writeManifest(ctx context.Context, task franciswor
 	for i := range results {
 		results[i].Index = i
 		results[i].Name = tasks[i].Spec.Name
-		if !results[i].Succeeded() {
-			return nil, errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("variant result %d did not report success", i))
-		}
 	}
 
 	m, err := buildManifest(imagekeys.New(), req, snap, tasks[0].SourceSize, results)
@@ -798,9 +790,6 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 		if result.CompletedAt.After(m.CompletedAt) {
 			m.CompletedAt = result.CompletedAt
 		}
-		if !result.Succeeded() {
-			m.Status = manifest.StatusFailed
-		}
 		switch {
 		case result.Skipped != nil:
 			continue
@@ -817,15 +806,13 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 				Width:      result.Width,
 				Height:     result.Height,
 				Size:       result.Size,
-				Succeeded:  result.Succeeded(),
-				Error:      result.Error,
 			}
 		}
 		m.Variants[i].Key = key(m.Variants[i].Width, m.Variants[i].Height, m.Variants[i].Format)
 	}
 
 	// A skipped entry repeats its holder's file, so a reader that doesn't know about skipped entries sees a duplicate of that file
-	// It's satisfied rather than failed, because the holder's file is what this box asked for
+	// The holder's file is what this box asked for, since the source can't fill the box
 	for i, spec := range req.Variants {
 		skip := results[i].Skipped //nolint:gosec // Result and request counts are required to match above
 		if skip == nil {
@@ -848,7 +835,6 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 			Width:      holder.Width,
 			Height:     holder.Height,
 			Size:       holder.Size,
-			Succeeded:  results[i].Succeeded() && holder.Succeeded, //nolint:gosec // Result and request counts are required to match above
 			Skipped:    true,
 			SkippedFor: &skippedFor,
 		}
@@ -897,7 +883,5 @@ func reusedEntry(spec VariantSpec, stored manifest.Variant) manifest.Variant {
 		Width:      stored.Width,
 		Height:     stored.Height,
 		Size:       stored.Size,
-		Succeeded:  stored.Succeeded,
-		Error:      stored.Error,
 	}
 }
