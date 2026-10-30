@@ -43,8 +43,6 @@ type Manifest struct {
 
 	// Key of the original in the originals store
 	SourceKey string `json:"sourceKey"`
-	// Name of the file that was uploaded, as the client reported it
-	SourceName string `json:"sourceName,omitempty"`
 	// Format of the original, detected from its content: `jpg`, `png`, `webp`, `avif`, `heic`, or `heif`
 	SourceFormat string `json:"sourceFormat"`
 	// Size of the original, in bytes

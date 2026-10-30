@@ -50,10 +50,11 @@ type Runtime struct {
 // The runtime backing it is chosen by "actors.runtime": embedded in this process (Francis' "local" topology), which needs no control plane to be deployed alongside the service, or a standalone Francis runtime this process only connects to (the "remote" topology), which is what scaling past a handful of instances wants
 // Both hosts implement the same host.Host interface, so everything below this line is identical in either topology
 type Host struct {
-	host        host.Host
-	jobs        *hostJobs
-	rateLimiter *ratelimit.RateLimitService
-	sourceCache *sourcecache.Cache
+	host              host.Host
+	jobs              *hostJobs
+	ingestRateLimiter *ratelimit.RateLimitService
+	statusRateLimiter *ratelimit.RateLimitService
+	sourceCache       *sourcecache.Cache
 }
 
 // NewHostOpts contains the options for NewHost
@@ -114,18 +115,15 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 		CompletedWorkflowRetention: cfg.Actors.CompletedWorkflowRetention,
 	}
 
-	// Register the shared per-caller limiter before the host starts so every topology routes checks through Francis
-	rateLimiterActor, err := ratelimit.New("provino-ingest",
-		ratelimit.WithRate(cfg.RateLimit.Rate),
-		ratelimit.WithPer(cfg.RateLimit.Per),
-		ratelimit.WithBurst(cfg.RateLimit.Burst),
-	)
+	// Register the shared per-caller limiters before the host starts so every topology routes checks through Francis
+	// Uploads and status lookups each get a limiter of their own, so polling the jobs of a batch of uploads never uses up the budget of the uploads
+	ingestRateLimiter, err := registerRateLimiter(h, "provino-ingest", cfg.RateLimit.Rate, cfg.RateLimit.Per, cfg.RateLimit.Burst)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create the ingest rate limiter: %w", err)
+		return nil, err
 	}
-	err = h.RegisterBuiltInActor(rateLimiterActor)
+	statusRateLimiter, err := registerRateLimiter(h, "provino-status", cfg.RateLimit.Status.Rate, cfg.RateLimit.Status.Per, cfg.RateLimit.Status.Burst)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register the ingest rate limiter: %w", err)
+		return nil, err
 	}
 
 	// Francis owns placement and shares this strict per-host budget across every worker queue in the workflow
@@ -163,9 +161,29 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 			service: h.Service(),
 			jobs:    jobs,
 		},
-		rateLimiter: rateLimiterActor.Service(h.Service()),
-		sourceCache: sourceCache,
+		ingestRateLimiter: ingestRateLimiter.Service(h.Service()),
+		statusRateLimiter: statusRateLimiter.Service(h.Service()),
+		sourceCache:       sourceCache,
 	}, nil
+}
+
+// Create a per-caller rate limiter and register it with the host
+func registerRateLimiter(h host.Host, name string, rate int, per time.Duration, burst int) (*ratelimit.RateLimit, error) {
+	limiter, err := ratelimit.New(name,
+		ratelimit.WithRate(rate),
+		ratelimit.WithPer(per),
+		ratelimit.WithBurst(burst),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the rate limiter '%s': %w", name, err)
+	}
+
+	err = h.RegisterBuiltInActor(limiter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register the rate limiter '%s': %w", name, err)
+	}
+
+	return limiter, nil
 }
 
 // Jobs returns what the API handlers use to start jobs and read their status
@@ -173,9 +191,14 @@ func (h *Host) Jobs() Jobs {
 	return h.jobs
 }
 
-// RateLimiter returns the Francis service used to protect browser uploads
-func (h *Host) RateLimiter() *ratelimit.RateLimitService {
-	return h.rateLimiter
+// IngestRateLimiter returns the Francis service used to protect browser uploads
+func (h *Host) IngestRateLimiter() *ratelimit.RateLimitService {
+	return h.ingestRateLimiter
+}
+
+// StatusRateLimiter returns the Francis service used to protect the job status lookups
+func (h *Host) StatusRateLimiter() *ratelimit.RateLimitService {
+	return h.statusRateLimiter
 }
 
 // SourceCache returns the local cache of source images, which the upload handler writes into as an upload streams by

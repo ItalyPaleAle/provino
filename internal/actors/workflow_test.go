@@ -445,10 +445,10 @@ func (h *testHost) upload(t *testing.T, imageID uuid.UUID, width int, height int
 	_, size, err := h.store.SaveOriginal(t.Context(), testNamespace, imageID, "png", bytes.NewReader(buf), int64(len(buf)), "image/png")
 	require.NoError(t, err)
 
-	source := JobSource{Format: "png", Name: "source.png", Size: size, Width: width, Height: height, StoredAt: time.Now().UTC().Truncate(time.Second)}
+	source := JobSource{Format: "png", Size: size, Width: width, Height: height, StoredAt: time.Now().UTC().Truncate(time.Second)}
 	err = h.store.WriteManifest(t.Context(), testNamespace, imageID, manifest.Manifest{
 		Version: manifest.Version, Namespace: testNamespace, ImageID: imageID.String(), Status: manifest.StatusStored,
-		SourceKey: h.store.OriginalKey(testNamespace, imageID, "png"), SourceName: source.Name, SourceFormat: "png", SourceSize: size,
+		SourceKey: h.store.OriginalKey(testNamespace, imageID, "png"), SourceFormat: "png", SourceSize: size,
 		SourceWidth: width, SourceHeight: height, StoredAt: source.StoredAt, Variants: []manifest.Variant{},
 	})
 	require.NoError(t, err)
@@ -574,7 +574,7 @@ func TestJobGeneratesEveryVariant(t *testing.T) {
 	m := host.manifest(t, imageID)
 	assert.Equal(t, manifest.StatusCompleted, m.Status)
 	assert.Equal(t, jobID, m.JobID)
-	assert.Equal(t, "source.png", m.SourceName)
+	assert.Equal(t, source.Size, m.SourceSize)
 	assert.Equal(t, source.StoredAt, m.StoredAt.UTC())
 	require.Len(t, m.Variants, len(variants))
 	require.NotNil(t, event.Data.Manifest)
@@ -899,6 +899,33 @@ func TestImageActorFreesAJobWhoseJournalCouldBePurged(t *testing.T) {
 	assert.Equal(t, jobID, host.manifest(t, imageID).JobID)
 }
 
+// A start that fails may have been recorded by Francis anyway, so its job stays active without the request heal would start it from: a workflow that exists keeps the image busy, and one that doesn't is freed rather than started
+func TestImageActorKeepsAJobWhoseStartFailed(t *testing.T) {
+	host := startTestHost(t, testHostOptions{})
+
+	imageID := uuid.NewV4()
+	source := host.upload(t, imageID, 800, 600)
+
+	// A context larger than a workflow's input can hold makes the start fail
+	oversized := JobRequest{Namespace: testNamespace, ImageID: imageID.String(), Source: &source, Notify: &webhook.Notify{Context: json.RawMessage(`{"a":"` + strings.Repeat("a", 70<<10) + `"}`)}, RequestedAt: time.Now()}
+	_, err := host.Jobs().Start(t.Context(), oversized)
+	require.Error(t, err)
+
+	var state imageState
+	err = host.host.Service().GetState(t.Context(), imageActorType, imageActorID(testNamespace, imageID.String()), &state)
+	require.NoError(t, err)
+	require.NotNil(t, state.Active)
+	assert.Nil(t, state.Active.Request)
+	failedID := state.Active.JobID
+
+	// This start never reached Francis, so the next job frees the image and runs, and the failed one never does
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	host.waitForJob(t, imageID, jobID, StatusCompleted)
+	_, found, err := host.jobs.jobs.instanceStatus(t.Context(), testNamespace, imageID.String(), failedID)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
 func TestImageActorCouldBePurged(t *testing.T) {
 	now := time.Now()
 	startedAt := now.Add(-2 * time.Hour)
@@ -946,7 +973,8 @@ func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *tes
 	assert.Equal(t, 200, regenerated.Variants[1].Width)
 	assert.Equal(t, 150, regenerated.Variants[1].Height)
 	// The original's details came from the manifest the upload wrote
-	assert.Equal(t, "source.png", regenerated.SourceName)
+	assert.Equal(t, initial.SourceSize, regenerated.SourceSize)
+	assert.Equal(t, initial.StoredAt, regenerated.StoredAt)
 }
 
 // No variant is larger than its source, and boxes that would only repeat the source's pixels store nothing
@@ -1213,15 +1241,20 @@ func TestHostRateLimiter(t *testing.T) {
 		c.RateLimit.Burst = 1
 	}})
 
-	allowed, retryAfter, err := host.RateLimiter().Allow(t.Context(), "198.51.100.7")
+	allowed, retryAfter, err := host.IngestRateLimiter().Allow(t.Context(), "198.51.100.7")
 	require.NoError(t, err)
 	assert.True(t, allowed)
 	assert.Zero(t, retryAfter)
 
-	allowed, retryAfter, err = host.RateLimiter().Allow(t.Context(), "198.51.100.7")
+	allowed, retryAfter, err = host.IngestRateLimiter().Allow(t.Context(), "198.51.100.7")
 	require.NoError(t, err)
 	assert.False(t, allowed)
 	assert.Positive(t, retryAfter)
+
+	// Status lookups have a budget of their own, which the uploads didn't spend
+	allowed, _, err = host.StatusRateLimiter().Allow(t.Context(), "198.51.100.7")
+	require.NoError(t, err)
+	assert.True(t, allowed)
 }
 
 func TestJobServiceStartValidation(t *testing.T) {

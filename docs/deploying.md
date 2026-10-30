@@ -86,9 +86,11 @@ Only `/v1/public/*` answers cross-origin requests.
 
 Uploads are rate-limited per caller, based on the token's subject. The defaults is 10/minute, with a burst of 30/minute, which lets a user drop a folder of photos in at once. Tune them with `rateLimit.rate`, `rateLimit.per` and `rateLimit.burst`.
 
-When the service runs behind a load balancer or a reverse proxy, list the addresses it connects from in `server.trustedProxies`. Provino uses these headers in order: `X-Forwarded-For`, `Forwarded`, `X-Real-IP`.
+Job status lookups, on both `/v1/public/images/…/jobs/…` and `/v1/client/images/…/jobs/…`, are rate-limited per caller too, with a budget of their own so polling never uses up the uploads': 600/minute by default, with a burst of 300, which lets a browser poll every job of a folder it just uploaded. Tune them with `rateLimit.status.rate`, `rateLimit.status.per` and `rateLimit.status.burst`. A throttled lookup gets `429 rate_limited` with a `Retry-After` header, and the Go client's `WaitForJob` simply polls again at its next interval.
 
-An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, and may be up to `images.maxUploadSize` (32 MB by default) and `images.maxSourcePixels` (50 megapixels by default).
+When the service runs behind a load balancer or a reverse proxy, list the addresses it connects from in `server.trustedProxies`. Provino reads the client's address from `X-Forwarded-For`, or from `Forwarded` when that's missing, and from `X-Real-IP` only when the request carries neither, since a proxy that maintains one of the lists passes `X-Real-IP` through as the client sent it.
+
+An upload may take up to `server.readTimeout` (5 minutes by default) to arrive, and may be up to `images.maxUploadSize` (32 MB by default) and `images.maxSourcePixels` (50 megapixels by default). The write deadline, `server.writeTimeout`, starts when the request headers are read, so it includes the time the upload takes to arrive: when you raise `server.readTimeout`, keep `server.writeTimeout` longer by about a minute (it's 6 minutes by default), which leaves time to store the image and start its job before the response is sent.
 
 ## The actor runtime (Francis)
 

@@ -115,7 +115,7 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 		{Name: "2000x2000.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 2000, Height: 2000}, Fit: imaging.FitContain},
 	}}
 	now := time.Now()
-	snap := jobSnapshot{SourceFormat: "png", SourceName: "source.png", SourceSize: 999, StartedAt: now}
+	snap := jobSnapshot{SourceFormat: "png", SourceSize: 999, StartedAt: now}
 	results := []VariantResult{
 		{Index: 0, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
 		{Index: 1, CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},

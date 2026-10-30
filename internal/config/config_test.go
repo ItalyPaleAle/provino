@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -195,6 +196,23 @@ func TestValidateAuth(t *testing.T) {
 
 		err := cfg.Validate(testLogger())
 		require.NoError(t, err)
+	})
+
+	// An empty server scope is allowed, but it opens the client API to every caller, so it's worth a warning
+	t.Run("warns about an empty server scope", func(t *testing.T) {
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+		cfg := validConfigForTest()
+		err := cfg.Validate(logger)
+		require.NoError(t, err)
+		assert.NotContains(t, logs.String(), "auth.scopes.server")
+
+		cfg = validConfigForTest()
+		cfg.Auth.Scopes.Server = ""
+		err = cfg.Validate(logger)
+		require.NoError(t, err)
+		assert.Contains(t, logs.String(), "auth.scopes.server")
 	})
 
 	tests := map[string]func(c *Config){
@@ -554,6 +572,18 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:    "no rate limit burst",
 			updater: func(c *Config) { c.RateLimit.Burst = 0 },
+		},
+		{
+			name:    "no status rate limit",
+			updater: func(c *Config) { c.RateLimit.Status.Rate = 0 },
+		},
+		{
+			name:    "no status rate limit period",
+			updater: func(c *Config) { c.RateLimit.Status.Per = 0 },
+		},
+		{
+			name:    "no status rate limit burst",
+			updater: func(c *Config) { c.RateLimit.Status.Burst = 0 },
 		},
 		{
 			name:    "actor address without a port",

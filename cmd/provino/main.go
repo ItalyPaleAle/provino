@@ -120,6 +120,7 @@ func main() {
 	shutdowns.Add(tracerShutdownFn)
 
 	// Init libvips, which generates the variants
+	// It's deliberately not among the shutdown functions, which run together, so an encode still draining can't lose libvips from under it
 	err = imaging.Startup(ctx, imaging.Options{
 		CacheMaxMemory: cfg.Images.VipsCacheMaxMemory,
 		Logger:         log.With(slog.String("scope", "libvips")),
@@ -129,10 +130,6 @@ func main() {
 		slogkit.FatalError(log, "Failed to init libvips", err)
 		return
 	}
-	shutdowns.Add(func(context.Context) error {
-		imaging.Shutdown()
-		return nil
-	})
 
 	encoder := imaging.NewEncoder()
 
@@ -193,18 +190,19 @@ func main() {
 	// Create HTTP server
 	log.Info("Initializing API server")
 	apiServer, err := server.NewServer(server.NewServerOpts{
-		AppMetrics:    appMetrics,
-		TraceProvider: traceProvider,
-		Jobs:          actorHost.Jobs(),
-		RateLimiter:   actorHost.RateLimiter(),
-		Store:         imageStore,
-		SourceCache:   actorHost.SourceCache(),
-		Measurer:      encoder,
-		Authenticator: authenticators,
-		Authorizer:    uploadAuthorizer,
-		Notifier:      notifier,
-		SigningKeys:   signingKeys,
-		Ready:         actorHost.Ready(),
+		AppMetrics:        appMetrics,
+		TraceProvider:     traceProvider,
+		Jobs:              actorHost.Jobs(),
+		IngestRateLimiter: actorHost.IngestRateLimiter(),
+		StatusRateLimiter: actorHost.StatusRateLimiter(),
+		Store:             imageStore,
+		SourceCache:       actorHost.SourceCache(),
+		Measurer:          encoder,
+		Authenticator:     authenticators,
+		Authorizer:        uploadAuthorizer,
+		Notifier:          notifier,
+		SigningKeys:       signingKeys,
+		Ready:             actorHost.Ready(),
 	})
 	if err != nil {
 		shutdowns.Run(log)

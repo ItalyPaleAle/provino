@@ -53,7 +53,6 @@ Each image has a manifest next to its variants, which is rewritten by every job 
   "status": "completed",
   "jobId": "019a7c3e-5b2d-7f41-9c8a-2d4e6f8a0b1c",
   "sourceKey": "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_orig.jpg",
-  "sourceName": "photo.jpg",
   "sourceFormat": "jpg",
   "sourceSize": 482113,
   "sourceWidth": 2400,

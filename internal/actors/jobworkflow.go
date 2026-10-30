@@ -158,13 +158,11 @@ func (w *jobWorkflowHandlers) snapshot(ctx context.Context, task francisworkflow
 	switch {
 	case req.Source != nil:
 		snap.SourceFormat = req.Source.Format
-		snap.SourceName = req.Source.Name
 		snap.SourceSize = req.Source.Size
 		snap.SourceResolution = imaging.Resolution{Width: req.Source.Width, Height: req.Source.Height}
 		snap.StoredAt = req.Source.StoredAt
 	case previous != nil:
 		snap.SourceFormat = previous.SourceFormat
-		snap.SourceName = previous.SourceName
 		snap.SourceSize = previous.SourceSize
 		snap.SourceResolution = imaging.Resolution{Width: previous.SourceWidth, Height: previous.SourceHeight}
 		snap.StoredAt = previous.StoredAt
@@ -749,7 +747,6 @@ func storedManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, n
 		ImageID:      imageID.String(),
 		Status:       manifest.StatusStored,
 		SourceKey:    layout.OriginalKey(namespace, imageID, snap.SourceFormat),
-		SourceName:   snap.SourceName,
 		SourceFormat: snap.SourceFormat,
 		SourceSize:   snap.SourceSize,
 		SourceWidth:  snap.SourceResolution.Width,

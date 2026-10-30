@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -140,7 +139,8 @@ type ConfigServer struct {
 	ReadTimeout time.Duration `yaml:"readTimeout"`
 
 	// Maximum time to write a response, measured from the end of reading the request headers
-	// +default "5m"
+	// The time an upload's body takes to arrive counts against it too, so it has to be longer than `readTimeout`, with room left to store the image and start its job
+	// +default "6m"
 	WriteTimeout time.Duration `yaml:"writeTimeout"`
 
 	// TLS configuration
@@ -231,7 +231,7 @@ type ConfigAuthScopes struct {
 	Ingest string `yaml:"ingest"`
 
 	// Scope required to use the client API under `/v1/client`, which is trusted with every namespace
-	// Set it to an empty string to accept any authenticated caller
+	// Set it to an empty string to accept any authenticated caller, which logs a warning at startup
 	// +default "server"
 	Server string `yaml:"server"`
 }
@@ -443,7 +443,7 @@ type ConfigStorage struct {
 	SourceCache string `yaml:"sourceCache"`
 }
 
-// ConfigRateLimit configures the Francis rate-limit actor protecting browser uploads
+// ConfigRateLimit configures the Francis rate-limit actors protecting browser uploads and job status lookups
 type ConfigRateLimit struct {
 	// Number of uploads admitted per caller during each `per` interval
 	// +default 10
@@ -456,6 +456,26 @@ type ConfigRateLimit struct {
 	// Maximum number of uploads from one caller that can be admitted at once before throttling starts
 	// It's what lets a user drop a whole folder of photos in at once, while `rate` bounds a steady stream
 	// +default 30
+	Burst int `yaml:"burst"`
+
+	// Per-caller limit on job status lookups, through both `/v1/public/images/…/jobs/…` and `/v1/client/images/…/jobs/…`
+	// It has a budget of its own, so polling the jobs of a batch of uploads never uses up the budget of the uploads themselves
+	Status ConfigRateLimitStatus `yaml:"status"`
+}
+
+// ConfigRateLimitStatus configures the per-caller limit on job status lookups
+type ConfigRateLimitStatus struct {
+	// Number of lookups admitted per caller during each `per` interval
+	// +default 600
+	Rate int `yaml:"rate"`
+
+	// Interval over which `rate` lookups are admitted
+	// +default "1m"
+	Per time.Duration `yaml:"per"`
+
+	// Maximum number of lookups from one caller that can be admitted at once before throttling starts
+	// It's what lets a browser poll every job of a folder of photos it just uploaded, while `rate` bounds a steady stream
+	// +default 300
 	Burst int `yaml:"burst"`
 }
 
@@ -565,13 +585,6 @@ type internal struct {
 	externalCAPEM    []byte   // PEM-encoded cluster CA the host pins, read from the config or from disk during Validate
 }
 
-// String implements fmt.Stringer and prints out the config for debugging
-func (c *Config) String() string {
-	//nolint:errchkjson,musttag
-	enc, _ := json.Marshal(c)
-	return string(enc)
-}
-
 // GetLoadedConfigPath returns the path to the config file that was loaded
 func (c *Config) GetLoadedConfigPath() string {
 	return c.internal.configFileLoaded
@@ -611,7 +624,7 @@ func (c *Config) Validate(logger *slog.Logger) error {
 		return err
 	}
 
-	err = c.validateAuth()
+	err = c.validateAuth(logger)
 	if err != nil {
 		return err
 	}
@@ -756,7 +769,7 @@ func regularFileExists(path string) (bool, error) {
 }
 
 // Validate the "auth" section
-func (c *Config) validateAuth() error {
+func (c *Config) validateAuth(logger *slog.Logger) error {
 	jwtEnabled := c.Auth.JWT.Issuer != ""
 	apiKeysEnabled := len(c.Auth.APIKeys) > 0
 
@@ -784,6 +797,11 @@ func (c *Config) validateAuth() error {
 	err := c.validateAPIKeys()
 	if err != nil {
 		return err
+	}
+
+	// An empty scope admits every authenticated caller, which is allowed, but for the client API it means a browser's token can write to every namespace
+	if c.Auth.Scopes.Server == "" {
+		logger.Warn("Configuration option 'auth.scopes.server' is empty, so every authenticated caller can use the client API, which is trusted with every namespace")
 	}
 
 	return nil
@@ -1044,6 +1062,16 @@ func (c *Config) validateRateLimit() error {
 	}
 	if c.RateLimit.Burst <= 0 {
 		return errors.New("configuration option 'rateLimit.burst' must be greater than zero")
+	}
+
+	if c.RateLimit.Status.Rate <= 0 {
+		return errors.New("configuration option 'rateLimit.status.rate' must be greater than zero")
+	}
+	if c.RateLimit.Status.Per <= 0 {
+		return errors.New("configuration option 'rateLimit.status.per' must be greater than zero")
+	}
+	if c.RateLimit.Status.Burst <= 0 {
+		return errors.New("configuration option 'rateLimit.status.burst' must be greater than zero")
 	}
 
 	return nil
