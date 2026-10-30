@@ -67,7 +67,6 @@ func TestHTTPAuthorizer(t *testing.T) {
 			assert.Equal(t, webhook.AuthorizeVersion, req.Version)
 			assert.Equal(t, "user-1", req.Subject)
 			assert.JSONEq(t, `{"site":"s1","profile":"hero"}`, string(req.Context))
-			assert.Equal(t, webhook.AuthorizeFile{Name: "photo.jpg", ContentType: "image/jpeg"}, req.File)
 
 			answer(w, http.StatusOK, webhook.AuthorizeResponse{
 				Namespace:      "s1",
@@ -79,7 +78,7 @@ func TestHTTPAuthorizer(t *testing.T) {
 			})
 		})
 
-		decision, err := a.Authorize(t.Context(), Request{Subject: "user-1", Context: json.RawMessage(`{"site":"s1","profile":"hero"}`), FileName: "photo.jpg", ContentType: "image/jpeg"})
+		decision, err := a.Authorize(t.Context(), Request{Subject: "user-1", Context: json.RawMessage(`{"site":"s1","profile":"hero"}`)})
 		require.NoError(t, err)
 		assert.Equal(t, "s1", decision.Namespace)
 		assert.Equal(t, imageID, decision.ImageID)

@@ -72,7 +72,7 @@ func TestUploadStreamsTheMetadataFirst(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "image bytes", string(image))
 
-		respond(w, http.StatusAccepted, JobAccepted{Namespace: "tenant-1", ImageID: "img", JobID: "job", Status: JobQueued})
+		respond(w, http.StatusAccepted, JobAccepted{Namespace: "tenant-1", ImageID: "img", JobID: "job", Status: JobRunning})
 	})
 
 	accepted, err := c.Upload(t.Context(), UploadMetadata{
@@ -90,23 +90,24 @@ func TestOptimizeAndErrors(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&req)
 		assert.NoError(t, err)
 
-		if req.ImageID == "full" {
-			respond(w, http.StatusTooManyRequests, Error{Code: "queue_full", Message: "The image already has the maximum number of jobs waiting"})
+		if req.ImageID == "busy" {
+			respond(w, http.StatusConflict, Error{Code: "image_busy", Message: "The image has another job running, or is still being uploaded"})
 			return
 		}
-		respond(w, http.StatusAccepted, JobAccepted{ImageID: req.ImageID, JobID: "job", Status: JobQueued, Position: 1})
+		respond(w, http.StatusAccepted, JobAccepted{ImageID: req.ImageID, JobID: "job", Status: JobRunning})
 	})
 
 	accepted, err := c.Optimize(t.Context(), OptimizeRequest{Namespace: "n", ImageID: "img"})
 	require.NoError(t, err)
-	assert.Equal(t, 1, accepted.Position)
+	assert.Equal(t, "job", accepted.JobID)
+	assert.Equal(t, JobRunning, accepted.Status)
 
-	_, err = c.Optimize(t.Context(), OptimizeRequest{Namespace: "n", ImageID: "full"})
+	_, err = c.Optimize(t.Context(), OptimizeRequest{Namespace: "n", ImageID: "busy"})
 	require.Error(t, err)
-	assert.True(t, IsCode(err, "queue_full"))
+	assert.True(t, IsCode(err, "image_busy"))
 	apiErr, ok := err.(*APIError) //nolint:errorlint // The client returns the error itself, unwrapped
 	require.True(t, ok)
-	assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
+	assert.Equal(t, http.StatusConflict, apiErr.StatusCode)
 }
 
 func TestUnexpectedResponsesAreStillAPIErrors(t *testing.T) {

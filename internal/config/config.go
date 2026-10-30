@@ -377,30 +377,14 @@ type ConfigSigning struct {
 
 // ConfigSigningEd25519 configures the Ed25519 signing keys
 //
-// Every key is published at `/.well-known/provino-keys.json`, and requests are signed with the active one
+// Every key is published at `/.well-known/provino-keys.json`, and requests are signed with the first one
 type ConfigSigningEd25519 struct {
-	// ID of the key requests are signed with, which must have a private key
-	ActiveKey string `yaml:"activeKey"`
-
-	// Signing keys
-	// Each one has an `id` and either a private key (`privateKey`, or `privateKeyFile` for a path) or, for a retired key that is still published, a public key (`publicKey` or `publicKeyFile`)
-	// Keys are PEM-encoded, or in the Standard Webhooks `whsk_` and `whpk_` forms
-	// +example [{"id": "2026-10", "privateKeyFile": "/etc/provino/webhook-2026-10.pem"}]
-	Keys []ConfigSigningKey `yaml:"keys"`
-}
-
-// ConfigSigningKey is one Ed25519 key
-type ConfigSigningKey struct {
-	// ID of the key, published as its `kid`
-	ID string `yaml:"id"`
-	// Private key, PEM-encoded or in the `whsk_` form
-	PrivateKey string `yaml:"privateKey"`
-	// Path of a file holding the private key
-	PrivateKeyFile string `yaml:"privateKeyFile"`
-	// Public key of a retired key, PEM-encoded or in the `whpk_` form
-	PublicKey string `yaml:"publicKey"`
-	// Path of a file holding the public key of a retired key
-	PublicKeyFile string `yaml:"publicKeyFile"`
+	// Private keys requests are signed with
+	// The first key signs every request, and the others are only published, so receivers can trust a new key before it moves to the top and an old one until it's removed
+	// Keys are PEM-encoded (PKCS #8), JWKs, or in the Standard Webhooks `whsk_` form, and `!file <path>` reads one from a file
+	// A key is published with the `kid` of its JWK or, when it has none, the first 7 bytes of the SHA-256 of its public key, base64url-encoded
+	// +example [!file /etc/provino/webhook-2026-10.pem]
+	Keys []string `yaml:"keys"`
 }
 
 // ConfigImages represents the limits for images and variants
@@ -422,10 +406,6 @@ type ConfigImages struct {
 	// Maximum width or height, in pixels, of a requested variant
 	// +default 8192
 	MaxResolution int `yaml:"maxResolution"`
-
-	// Maximum number of jobs that can wait for one image while another of its jobs runs
-	// +default 10
-	MaxQueuedJobs int `yaml:"maxQueuedJobs"`
 
 	// Maximum number of encoding tasks Francis runs on each host at once.
 	// Encoding is CPU- and memory-bound, so this bounds the resources a burst of jobs can consume while allowing excess tasks to move to another host.
@@ -519,7 +499,7 @@ type ConfigActors struct {
 
 	// How long each workflow handler attempt and compensation may execute after a worker starts it
 	// Queue wait and retry backoff do not consume this execution budget
-	// The complete workflow has a separate backstop of six times this value, which starts when the job leaves the image's queue
+	// The complete workflow has a separate backstop of six times this value, which starts when the job starts
 	// +default "10m"
 	WorkflowTimeout time.Duration `yaml:"workflowTimeout"`
 
@@ -889,47 +869,13 @@ func (c *Config) validateAPIKeys() error {
 	return nil
 }
 
-// Validate the "signing" section's structure, while the keys themselves are parsed when the signer is created at startup
+// Validate the "signing" section's structure
+// The keys themselves are parsed when the signer is created at startup, which is also where their IDs are known and checked for duplicates
 func (c *Config) validateSigning() error {
-	ed := c.Signing.Ed25519
-	if len(ed.Keys) == 0 {
-		if ed.ActiveKey != "" {
-			return errors.New("configuration option 'signing.ed25519.activeKey' is set but there are no keys in 'signing.ed25519.keys'")
+	for i, key := range c.Signing.Ed25519.Keys {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("configuration option 'signing.ed25519.keys' entry %d is empty", i)
 		}
-		return nil
-	}
-
-	ids := make(map[string]bool, len(ed.Keys))
-	for i, key := range ed.Keys {
-		if !nameRegex.MatchString(key.ID) {
-			return fmt.Errorf("configuration option 'signing.ed25519.keys' entry %d needs an 'id' of up to 64 letters, digits, dots, underscores or dashes", i)
-		}
-		_, found := ids[key.ID]
-		if found {
-			return fmt.Errorf("configuration option 'signing.ed25519.keys' contains the id '%s' more than once", key.ID)
-		}
-
-		sources := 0
-		for _, value := range []string{key.PrivateKey, key.PrivateKeyFile, key.PublicKey, key.PublicKeyFile} {
-			if value != "" {
-				sources++
-			}
-		}
-		if sources != 1 {
-			return fmt.Errorf("configuration option 'signing.ed25519.keys' entry '%s' needs exactly one of 'privateKey', 'privateKeyFile', 'publicKey', and 'publicKeyFile'", key.ID)
-		}
-
-		ids[key.ID] = key.PrivateKey != "" || key.PrivateKeyFile != ""
-	}
-
-	hasPrivate, found := ids[ed.ActiveKey]
-	switch {
-	case ed.ActiveKey == "":
-		return errors.New("configuration option 'signing.ed25519.activeKey' is required when keys are configured")
-	case !found:
-		return fmt.Errorf("configuration option 'signing.ed25519.activeKey' names '%s', which is not in 'signing.ed25519.keys'", ed.ActiveKey)
-	case !hasPrivate:
-		return fmt.Errorf("configuration option 'signing.ed25519.activeKey' names '%s', which has no private key", ed.ActiveKey)
 	}
 
 	return nil
@@ -1268,9 +1214,6 @@ func (c *Config) validateImages() error {
 	}
 	if c.Images.MaxResolution <= 0 {
 		return errors.New("configuration option 'images.maxResolution' must be greater than zero")
-	}
-	if c.Images.MaxQueuedJobs <= 0 {
-		return errors.New("configuration option 'images.maxQueuedJobs' must be greater than zero")
 	}
 	if c.Images.MaxConcurrentEncodes < 0 {
 		return errors.New("configuration option 'images.maxConcurrentEncodes' must not be negative")

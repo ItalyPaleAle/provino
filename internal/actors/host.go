@@ -36,15 +36,13 @@ type Runtime struct {
 	Log         *slog.Logger
 	// Webhook endpoints jobs report their outcome to, or nil when none are configured
 	Notifier *notify.Notifier
-	// Actor service, which a job uses to tell its image's queue that it finished
+	// Actor service, which a job uses to tell its image's actor that it finished
 	Service *actor.Service
 
 	// How long each forward or compensation handler may execute after a worker starts it
 	WorkflowTimeout time.Duration
 	// How long the status of a finished job is retained; zero retains it indefinitely
 	CompletedWorkflowRetention time.Duration
-	// How many jobs can wait for one image
-	MaxQueuedJobs int
 }
 
 // Host runs the Francis actor host that executes the jobs
@@ -70,7 +68,7 @@ type NewHostOpts struct {
 	alarmsPollInterval time.Duration
 }
 
-// NewHost creates the actor host and registers the image queue actor and the job workflow
+// NewHost creates the actor host and registers the image actor and the job workflow
 func NewHost(opts NewHostOpts) (*Host, error) {
 	cfg := config.Get()
 
@@ -114,7 +112,6 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 		Service:                    h.Service(),
 		WorkflowTimeout:            cfg.Actors.WorkflowTimeout,
 		CompletedWorkflowRetention: cfg.Actors.CompletedWorkflowRetention,
-		MaxQueuedJobs:              cfg.Images.MaxQueuedJobs,
 	}
 
 	// Register the shared per-caller limiter before the host starts so every topology routes checks through Francis
@@ -171,7 +168,7 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 	}, nil
 }
 
-// Jobs returns what the API handlers use to queue jobs and read their status
+// Jobs returns what the API handlers use to start jobs and read their status
 func (h *Host) Jobs() Jobs {
 	return h.jobs
 }

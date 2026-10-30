@@ -27,14 +27,13 @@ var (
 	errInvalidFormat    = httpserver.NewApiError("invalid_source_format", http.StatusBadRequest, "Invalid source format")
 
 	errImageExists       = httpserver.NewApiError("image_exists", http.StatusConflict, "An image with this ID is already stored, or being stored")
-	errUploadInProgress  = httpserver.NewApiError("upload_in_progress", http.StatusConflict, "The image is still being uploaded")
+	errImageBusy         = httpserver.NewApiError("image_busy", http.StatusConflict, "The image has another job running, or is still being uploaded")
 	errImageTooLarge     = httpserver.NewApiError("image_too_large", http.StatusRequestEntityTooLarge, "Uploaded image is larger than allowed")
 	errUnsupportedFormat = httpserver.NewApiError("unsupported_format", http.StatusUnsupportedMediaType, "Uploaded file is not an image in an accepted format")
 	errUnreadableImage   = httpserver.NewApiError("unreadable_image", http.StatusUnsupportedMediaType, "Uploaded image cannot be decoded")
 	errTooManyPixels     = httpserver.NewApiError("image_too_many_pixels", http.StatusUnprocessableEntity, "Uploaded image has more pixels than allowed")
 
 	errRateLimited = httpserver.NewApiError("rate_limited", http.StatusTooManyRequests, "Rate limit exceeded")
-	errQueueFull   = httpserver.NewApiError("queue_full", http.StatusTooManyRequests, "The image already has the maximum number of jobs waiting")
 
 	// The authorizer refused the upload, which is a decision about this caller rather than about its credentials
 	errUploadRefused    = httpserver.NewApiError("upload_refused", http.StatusForbidden, "The upload is not allowed")

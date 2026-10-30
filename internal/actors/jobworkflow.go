@@ -65,7 +65,6 @@ func NewJobWorkflow(rt *Runtime, concurrency int) (*francisworkflow.Workflow, er
 	retention := utils.PositiveOr(rt.CompletedWorkflowRetention, time.Duration(1<<62-1))
 
 	// Attempt deadlines begin after a worker starts so queued work cannot consume the handler budget, and the instance deadline is the backstop for the whole job
-	// The job waits for its turn in the image's queue before its workflow exists, so that wait doesn't count against either
 	wf, err := francisworkflow.New(jobWorkflowName,
 		francisworkflow.WithVersion(jobWorkflowVersion),
 		francisworkflow.WithTimeout(jobDeadline(rt.WorkflowTimeout)),
@@ -556,7 +555,7 @@ func (w *jobWorkflowHandlers) notify(ctx context.Context, task francisworkflow.T
 	return struct{}{}, nil
 }
 
-// Deliver one event to the endpoint the job resolved when it was queued
+// Deliver one event to the endpoint the job resolved when it was requested
 func (w *jobWorkflowHandlers) deliver(ctx context.Context, req JobRequest, event webhook.Event) error {
 	if w.runtime.Notifier == nil {
 		return errors.Join(actor.ErrJobPermanentFailure, errors.New("no webhook endpoints are configured"))
@@ -610,14 +609,14 @@ func (w *jobWorkflowHandlers) cleanupCompleted(ctx context.Context, task francis
 	return struct{}{}, nil
 }
 
-// Tell the image's queue that this job is done, so the next one starts
+// Tell the image's actor that this job is done, so the image is free for its next job
 func (w *jobWorkflowHandlers) release(ctx context.Context, task francisworkflow.Task) (any, error) {
 	req, _, _, err := decodeRequest(task)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = w.releaseQueue(ctx, req)
+	_, err = w.releaseImage(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -626,14 +625,14 @@ func (w *jobWorkflowHandlers) release(ctx context.Context, task francisworkflow.
 
 // Invoke the image actor's finished method, which ignores a job that isn't the active one, so a repeat is harmless
 // It returns when the actor recorded the job as finished, which is the same on every call, or zero when that isn't known
-func (w *jobWorkflowHandlers) releaseQueue(ctx context.Context, req JobRequest) (time.Time, error) {
+func (w *jobWorkflowHandlers) releaseImage(ctx context.Context, req JobRequest) (time.Time, error) {
 	if w.runtime.Service == nil {
 		return time.Time{}, nil
 	}
 
 	res, err := w.runtime.Service.Invoke(ctx, imageActorType, imageActorID(req.Namespace, req.ImageID), methodFinished, finishedRequest{JobID: req.JobID})
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to release the image's queue: %w", err)
+		return time.Time{}, fmt.Errorf("failed to release the image: %w", err)
 	}
 
 	// The time only dates the failure event, so an answer that can't be read doesn't fail the release
@@ -645,7 +644,7 @@ func (w *jobWorkflowHandlers) releaseQueue(ctx context.Context, req JobRequest) 
 	return result.FinishedAt, nil
 }
 
-// Clean up when a job fails: free the queue, report the failure, and remove the local source
+// Clean up when a job fails: free the image, report the failure, and remove the local source
 //
 // It is the compensation of the first step, so it runs last, once every other effect of the job has been undone and the manifest put back
 func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation francisworkflow.Compensation) error {
@@ -654,10 +653,10 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 		return err
 	}
 
-	// The queue is freed first, so a failure event that can't be delivered doesn't hold up the image's next job
-	finishedAt, err := w.releaseQueue(ctx, req)
+	// The image is freed first, so a failure event that can't be delivered doesn't hold up the image's next job
+	finishedAt, err := w.releaseImage(ctx, req)
 	if err != nil {
-		w.runtime.Log.WarnContext(ctx, "Failed to release the queue of a failed job; the image actor will notice on its own", slog.String("jobId", req.JobID), slog.Any("error", err))
+		w.runtime.Log.WarnContext(ctx, "Failed to release the image of a failed job; the image actor will notice on its own", slog.String("jobId", req.JobID), slog.Any("error", err))
 	}
 
 	w.removeSource(ctx, req.JobID, namespace, imageID)
@@ -672,7 +671,7 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 			previous = w.parsePrevious(ctx, snap.Previous, namespace, imageID)
 		}
 
-		// The event is dated when the image's queue recorded the failure, which the actor answers the same on every attempt
+		// The event is dated when the image's actor recorded the failure, which the actor answers the same on every attempt
 		// Without that answer it falls back to the latest durable time the job has, so the timestamp still doesn't change across attempts
 		timestamp := finishedAt
 		if timestamp.IsZero() {

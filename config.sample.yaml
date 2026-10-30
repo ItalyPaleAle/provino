@@ -295,17 +295,13 @@ signing:
   ## Description:
   ##   Ed25519 keys used by endpoints whose `auth.type` is `ed25519`
   ed25519:
-    ## signing.ed25519.activeKey (string)
+    ## signing.ed25519.keys (list of strings)
     ## Description:
-    ##   ID of the key requests are signed with, which must have a private key
-    #activeKey: ""
-
-    ## signing.ed25519.keys (list)
-    ## Description:
-    ##   Signing keys
-    ##   Each one has an `id` and either a private key (`privateKey`, or `privateKeyFile` for a path) or, for a retired key that is still published, a public key (`publicKey` or `publicKeyFile`)
-    ##   Keys are PEM-encoded, or in the Standard Webhooks `whsk_` and `whpk_` forms
-    #keys: [{"id": "2026-10", "privateKeyFile": "/etc/provino/webhook-2026-10.pem"}]
+    ##   Private keys requests are signed with
+    ##   The first key signs every request, and the others are only published, so receivers can trust a new key before it moves to the top and an old one until it's removed
+    ##   Keys are PEM-encoded (PKCS #8), JWKs, or in the Standard Webhooks `whsk_` form, and `!file <path>` reads one from a file
+    ##   A key is published with the `kid` of its JWK or, when it has none, the first 7 bytes of the SHA-256 of its public key, base64url-encoded
+    #keys: [!file /etc/provino/webhook-2026-10.pem]
 
 images:
   ## images.maxUploadSize (int64)
@@ -333,12 +329,6 @@ images:
   ##   Maximum width or height, in pixels, of a requested variant
   ## Default: 8192
   #maxResolution: 8192
-
-  ## images.maxQueuedJobs (number)
-  ## Description:
-  ##   Maximum number of jobs that can wait for one image while another of its jobs runs
-  ## Default: 10
-  #maxQueuedJobs: 10
 
   ## images.maxConcurrentEncodes (number)
   ## Description:
@@ -494,7 +484,7 @@ actors:
   ## Description:
   ##   How long each workflow handler attempt and compensation may execute after a worker starts it
   ##   Queue wait and retry backoff do not consume this execution budget
-  ##   The complete workflow has a separate backstop of six times this value, which starts when the job leaves the image's queue
+  ##   The complete workflow has a separate backstop of six times this value, which starts when the job starts
   ## Default: "10m"
   #workflowTimeout: "10m"
 

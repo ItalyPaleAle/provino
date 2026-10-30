@@ -17,7 +17,7 @@ storage:
 
 A `prefix` is applied by the backend to every key, so the keys below, and the keys in a manifest, are always relative to it.
 
-On the local file system, files are written as `0600` and folders as `0750` by default, so only the user provino runs as can read them. To serve the variants straight from the folder with a web server that runs as another user, give them wider permissions in the DSN, in octal, for example `fs:/var/lib/provino/data/variants?fileMode=0644&dirMode=0755`. The modes must keep read and write access for provino's own user, and a `?` in a local DSN always starts these options. They're given to every file as it's written and to every folder provino creates, whatever the umask, while folders that already exist keep their own: after widening the modes of a store that already holds images, `chmod` its existing folders once.
+On the local file system, files are written as `0600` and folders as `0750` by default. To serve the variants straight from the folder with a web server that runs as another user, give them wider permissions in the DSN, for example `fs:/var/lib/provino/data/variants?fileMode=0644&dirMode=0755`.
 
 provino doesn't serve images. Serve the variants from the store, using the keys in the manifest.
 
@@ -35,13 +35,15 @@ For example, `default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp`.
 
 - A variant's key is its actual size and format. Two variants of the same size and format are the same object, which is why a request can't ask for both with different encoder settings.
 - The extension of an original is its detected format: `jpg`, `png`, `webp`, `avif`, `heic` or `heif`.
-- New image IDs are UUIDv4s, so their leading characters spread evenly across the 65,536 folders.
+- New image IDs are UUIDv4s, so their leading characters spread evenly across the ~65,000 folders.
 
-The layout isn't configurable. Applications that compute keys in Go can use the [`imagekeys`](../imagekeys) package, but most don't need to: the manifest lists every key.
+The layout isn't configurable. Applications that compute keys in Go can use the [`imagekeys`](../imagekeys) package, but most commonly you will just load the keys from the manifest.
+
+> While the manifest doesn't contain secrets, if you're starting a file server / CDN directly from the variants storage whenever possible you may want to block public access to `.json` files to prevent serving the manifest.
 
 ## The manifest
 
-Each image has a manifest next to its variants. It's written when the original is stored (`stored`), and rewritten by every job that completes with variants (`completed`). A job that fails puts back the manifest it found.
+Each image has a manifest next to its variants, which is rewritten by every job that completes with variants (`completed`). A job that fails puts back the manifest it found.
 
 ```json
 {
@@ -92,8 +94,8 @@ Each image has a manifest next to its variants. It's written when the original i
 
 No variant is larger than its original. A box the original can't fill gets the original's own pixels:
 
-- with `contain`, the whole original;
-- with `cover`, the largest centered crop of the box's shape.
+- `contain`: the whole original
+- `cover`: the largest centered crop of the box's shape
 
 Every such box of one fit and format produces the same file, so only the tightest one stores it. The others are listed with `"skipped": true` and `skippedFor`, the box that holds the file, and they repeat that file's key, width, height and size. A reader that doesn't know about skipped entries sees a duplicate and drops it.
 
@@ -104,10 +106,12 @@ Every such box of one fit and format produces the same file, so only the tightes
 
 ### Changing an image's variants
 
-`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit and format are reused rather than encoded again, whatever encoder settings produced them. So sending the whole set costs nothing for the variants that are already there, and the manifest always lists the complete set.
+`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit and format are reused rather than encoded again, whatever encoder settings produced them. Re-sending the whole set is a no-op for the variants that are already there, and the manifest always lists the complete set.
 
 Variants that drop out of the set stay in the store, because an application may still reference them. Removing objects is left to the operator.
 
 ## Originals and IDs
 
-An image ID is spent by its first upload: an upload whose ID is already stored, in any format, is refused with `409 image_exists`. So is an upload of an ID that another upload is storing at the same time, or that a job is working on. An optimize request for an ID that an upload is still storing is refused with `409 upload_in_progress`, and can be sent again once the upload has returned. Originals are kept after their jobs complete, because every later optimize request reads them again.
+An image ID is spent by its first upload: an upload whose ID is already stored, in any format, is refused with `409 image_exists`. So is an upload of an ID that another upload is storing at the same time, or that a job is working on.
+
+An optimize request for an ID that an upload is still storing is refused with `409 upload_in_progress`, and can be sent again once the upload has returned. Originals are kept after their jobs complete, because every future optimize request reads them again.

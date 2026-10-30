@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const authorizeBody = `{"version":"provino/v1","subject":"user_1","context":{"site":"a"},"file":{"name":"photo.jpg","contentType":"image/jpeg"}}`
+const authorizeBody = `{"version":"provino/v1","subject":"user_1","context":{"site":"a"}}`
 
 type authorizeFunc = func(r *http.Request, ar *AuthorizeRequest) (*AuthorizeResponse, bool, error)
 
@@ -60,7 +60,6 @@ func TestHandleAuthorize(t *testing.T) {
 		require.NotNil(t, received)
 		assert.Equal(t, "user_1", received.Subject)
 		assert.JSONEq(t, `{"site":"a"}`, string(received.Context))
-		assert.Equal(t, AuthorizeFile{Name: "photo.jpg", ContentType: "image/jpeg"}, received.File)
 	})
 
 	t.Run("answers 403 when the callback refuses", func(t *testing.T) {
@@ -95,10 +94,10 @@ func TestHandleAuthorize(t *testing.T) {
 			body   string
 			status int
 		}{
-			"invalid JSON":             {body: `{"version":`, status: http.StatusBadRequest},
-			"another version":          {body: `{"version":"provino/v2","subject":"user_1"}`, status: http.StatusBadRequest},
-			"no version":               {body: `{"subject":"user_1"}`, status: http.StatusBadRequest},
-			"a body larger than 1 MiB": {body: `{"version":"provino/v1","subject":"` + strings.Repeat("a", maxBodyBytes) + `"}`, status: http.StatusRequestEntityTooLarge},
+			"invalid JSON":            {body: `{"version":`, status: http.StatusBadRequest},
+			"another version":         {body: `{"version":"provino/v2","subject":"user_1"}`, status: http.StatusBadRequest},
+			"no version":              {body: `{"subject":"user_1"}`, status: http.StatusBadRequest},
+			"a body larger than 1 MB": {body: `{"version":"provino/v1","subject":"` + strings.Repeat("a", maxBodyBytes) + `"}`, status: http.StatusRequestEntityTooLarge},
 		}
 		for name, tc := range tests {
 			t.Run(name, func(t *testing.T) {

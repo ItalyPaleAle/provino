@@ -12,33 +12,22 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 )
 
-var (
-	// ErrQueueFull is returned when an image already has as many jobs waiting as it may
-	ErrQueueFull = errors.New("the image already has the maximum number of jobs waiting")
+// ErrImageBusy is returned for a job of an image that has another job running, or that an upload is still storing
+// The job can be sent again once the image is free
+var ErrImageBusy = errors.New("the image has another job running, or is still being uploaded")
 
-	// ErrUploadInProgress is returned for a job of an image that an upload is still storing, which can be queued again once the upload is done
-	ErrUploadInProgress = errors.New("the image is still being uploaded")
-)
-
-// Jobs is what the API handlers use to queue jobs and read their status
+// Jobs is what the API handlers use to start jobs and read their status
 type Jobs interface {
-	// Enqueue adds a job to its image's queue and returns its ID, or ErrQueueFull or ErrUploadInProgress
-	Enqueue(ctx context.Context, req JobRequest) (EnqueueResult, error)
+	// Start starts a job's workflow and returns the job's ID, or ErrImageBusy
+	Start(ctx context.Context, req JobRequest) (string, error)
 	// Status returns a job's status, and the hash of the subject that started it when that's still known
 	// The boolean is false when the image has no such job, or when its status has expired
 	Status(ctx context.Context, namespace string, imageID string, jobID string) (JobStatus, string, bool, error)
 	// ClaimUpload holds an image's ID for one upload that names it, identified by token, for at most ttl
-	// It returns false when another upload holds the ID, or when a job of the image is queued or running
+	// It returns false when another upload holds the ID, or when a job of the image is running
 	ClaimUpload(ctx context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error)
 	// ReleaseUpload gives up the claim the upload identified by token holds, which does nothing when it holds none
 	ReleaseUpload(ctx context.Context, namespace string, imageID string, token string) error
-}
-
-// EnqueueResult is a job that was accepted
-type EnqueueResult struct {
-	JobID string
-	// 0 when the job started right away, its 1-based place in the queue otherwise
-	Position int
 }
 
 // jobService starts and inspects job workflows
@@ -126,25 +115,22 @@ type hostJobs struct {
 	jobs    *jobService
 }
 
-func (h *hostJobs) Enqueue(ctx context.Context, req JobRequest) (EnqueueResult, error) {
-	res, err := h.service.Invoke(ctx, imageActorType, imageActorID(req.Namespace, req.ImageID), methodEnqueue, req)
+func (h *hostJobs) Start(ctx context.Context, req JobRequest) (string, error) {
+	res, err := h.service.Invoke(ctx, imageActorType, imageActorID(req.Namespace, req.ImageID), methodStart, req)
 	if err != nil {
-		return EnqueueResult{}, fmt.Errorf("failed to queue the job: %w", err)
+		return "", fmt.Errorf("failed to start the job: %w", err)
 	}
 
-	var result enqueueResult
+	var result startResult
 	err = res.Decode(&result)
 	if err != nil {
-		return EnqueueResult{}, fmt.Errorf("failed to decode the queued job: %w", err)
+		return "", fmt.Errorf("failed to decode the started job: %w", err)
 	}
-	if result.QueueFull {
-		return EnqueueResult{}, ErrQueueFull
-	}
-	if result.UploadInProgress {
-		return EnqueueResult{}, ErrUploadInProgress
+	if result.Busy {
+		return "", ErrImageBusy
 	}
 
-	return EnqueueResult{JobID: result.JobID, Position: result.Position}, nil
+	return result.JobID, nil
 }
 
 func (h *hostJobs) ClaimUpload(ctx context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error) {
@@ -170,7 +156,7 @@ func (h *hostJobs) ReleaseUpload(ctx context.Context, namespace string, imageID 
 }
 
 func (h *hostJobs) Status(ctx context.Context, namespace string, imageID string, jobID string) (JobStatus, string, bool, error) {
-	// The image's actor knows the jobs that are waiting, which have no workflow yet, and who started the recent ones
+	// The image's actor knows who started the active job and the recent ones
 	res, err := h.service.Peek(ctx, imageActorType, imageActorID(namespace, imageID), methodJob, finishedRequest{JobID: jobID})
 	if err != nil {
 		return JobStatus{}, "", false, fmt.Errorf("failed to look up the job: %w", err)
@@ -186,12 +172,6 @@ func (h *hostJobs) Status(ctx context.Context, namespace string, imageID string,
 		Namespace: namespace,
 		ImageID:   imageID,
 	}
-	if lookup.State == "queued" {
-		status.Status = StatusQueued
-		status.Position = lookup.Position
-		return status, lookup.SubjectHash, true, nil
-	}
-
 	instance, found, err := h.jobs.instanceStatus(ctx, namespace, imageID, jobID)
 	if err != nil {
 		return JobStatus{}, "", false, err

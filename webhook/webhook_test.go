@@ -2,7 +2,9 @@ package webhook
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v4/jwk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,6 +162,50 @@ func TestParseEd25519Keys(t *testing.T) {
 		parsedPrivate, err := ParseEd25519PrivateKey(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})))
 		require.NoError(t, err)
 		assert.Equal(t, private, parsedPrivate)
+	})
+
+	t.Run("JWK form", func(t *testing.T) {
+		x := base64.RawURLEncoding.EncodeToString(public)
+		d := base64.RawURLEncoding.EncodeToString(private.Seed())
+		publicJWK := `{"kty":"OKP","crv":"Ed25519","x":"` + x + `","kid":"ignored"}`
+		privateJWK := `{"kty":"OKP","crv":"Ed25519","x":"` + x + `","d":"` + d + `"}`
+
+		parsedPublic, err := ParseEd25519PublicKey(publicJWK)
+		require.NoError(t, err)
+		assert.Equal(t, public, parsedPublic)
+
+		// A JWK in a file written by an editor ends with a newline, which is trimmed like the other forms' whitespace
+		parsedPrivate, err := ParseEd25519PrivateKey(privateJWK + "\n")
+		require.NoError(t, err)
+		assert.Equal(t, private, parsedPrivate)
+
+		// Each parser accepts only its own kind of key, so a private key can't be configured where a public one is expected
+		_, err = ParseEd25519PublicKey(privateJWK)
+		require.Error(t, err)
+		_, err = ParseEd25519PrivateKey(publicJWK)
+		require.Error(t, err)
+
+		// A private key whose x doesn't match its d is rejected rather than publishing the wrong public key
+		otherPublic, _ := newKey(t)
+		mismatched := `{"kty":"OKP","crv":"Ed25519","x":"` + base64.RawURLEncoding.EncodeToString(otherPublic) + `","d":"` + d + `"}`
+		_, err = ParseEd25519PrivateKey(mismatched)
+		require.Error(t, err)
+
+		// Keys of other types and curves are rejected
+		_, err = ParseEd25519PublicKey(`{"kty":"OKP","crv":"X25519","x":"` + x + `"}`)
+		require.Error(t, err)
+		ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		ecJWK, err := jwk.Import[jwk.Key](ecKey.Public())
+		require.NoError(t, err)
+		ecJSON, err := json.Marshal(ecJWK)
+		require.NoError(t, err)
+		_, err = ParseEd25519PublicKey(string(ecJSON))
+		require.Error(t, err)
+
+		// A key set isn't a key, even when it holds a single one
+		_, err = ParseEd25519PublicKey(`{"keys":[` + publicJWK + `]}`)
+		require.Error(t, err)
 	})
 
 	t.Run("malformed keys", func(t *testing.T) {

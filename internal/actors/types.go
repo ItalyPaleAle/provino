@@ -32,8 +32,6 @@ const ErrorImageNotFound = "image_not_found"
 type Status string
 
 const (
-	// StatusQueued means the job is waiting for an earlier job of the same image to finish
-	StatusQueued Status = "queued"
 	// StatusRunning means the job's workflow has started
 	StatusRunning Status = "running"
 	// StatusCompleted means the job finished and its manifest is stored
@@ -77,7 +75,7 @@ type JobSource struct {
 
 // JobRequest is the durable input of a job
 type JobRequest struct {
-	// ID of the job, minted by the image's queue actor
+	// ID of the job, minted by the image's actor
 	JobID string `json:"jobId"`
 	// Image the job works on
 	Namespace string `json:"namespace"`
@@ -191,8 +189,6 @@ type JobStatus struct {
 	Namespace string `json:"namespace"`
 	ImageID   string `json:"imageId"`
 	Status    Status `json:"status"`
-	// Position in the image's queue, set while the job is queued
-	Position int `json:"position,omitempty"`
 	// Number of variants the job generates, and how many are done
 	Total     int `json:"total"`
 	Completed int `json:"completed"`

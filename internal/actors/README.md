@@ -1,31 +1,29 @@
-# Jobs: the image queue and the job workflow
+# Jobs: the image actor and the job workflow
 
-Everything provino does after accepting a request runs as a job: every upload (from a browser or a backend) and every optimize request becomes one, with or without variants. A job waits in its image's queue, and when its turn comes it runs as a [Francis workflow](https://gofrancis.dev/workflows/).
+Everything provino does after accepting a request runs as a job: every upload (from a browser or a backend) and every optimize request becomes one, with or without variants. Each job runs as a [Francis workflow](https://gofrancis.dev/workflows/), and the jobs of one image run one at a time.
 
-Francis owns the actors, the workflow journal, retries, deadlines, retention and purging. provino declares the queue actor and the workflow graph, and supplies idempotent handlers for the work itself.
+Francis owns the actors, the workflow journal, retries, deadlines, retention and purging. provino declares the image actor and the workflow graph, and supplies idempotent handlers for the work itself.
 
-## The image queue
+## The image actor
 
-The jobs of one image run one at a time, in the order they were queued, so two jobs never write the same manifest at once. The `provino-image` actor, addressed as `<namespace>:<imageId>`, holds the queue. Francis forbids `/` in actor IDs, and a namespace can't contain `:`, so the two parts never run into each other.
+Every job writes its image's manifest, and a failed job puts back the manifest it found, so two jobs of one image running at once would undo each other's work. Francis has no way to keep a workflow to one running instance per key, so the `provino-image` actor, addressed as `<namespace>:<imageId>`, does it: it starts a job's workflow only when no other job of the image is running, and refuses the job otherwise. A refused job isn't kept anywhere: the caller gets `409 image_busy` and sends it again once the image is free. Francis forbids `/` in actor IDs, and a namespace can't contain `:`, so the two parts never run into each other.
 
-Its state is the active job, the jobs waiting behind it (each with its full `JobRequest`), a short history of finished jobs, and the claim of an upload that is storing the image. It has five methods and an alarm:
+Its state is the active job, a short history of finished jobs, and the claim of an upload that is storing the image. It has five methods and an alarm:
 
 | Method | What it does |
 | --- | --- |
-| `enqueue` | Refuses a job when `images.maxQueuedJobs` are already waiting. It also refuses a job without an upload's `source` while an upload holds the claim and hasn't queued its own job, since the original isn't stored yet and the job would fail with `image_not_found`; the upload's own job carries `source`, and a job sent after it waits behind it. Otherwise it mints a UUIDv7 job ID, appends the job, and starts it right away when nothing is active. It returns the job ID and its `position: 0` when it started, its place in the queue otherwise. A job whose workflow can't be started isn't accepted, so the caller finds out at once |
-| `finished` | Called by the workflow when it ends, it moves the active job to the history and starts the next one. A call about a job that isn't active is a repeat, and changes nothing |
-| `claim` | Holds the image's ID for an upload that named it, until the upload releases it or the claim expires (`server.readTimeout` plus a minute). It refuses when another upload holds the ID, or when a job of the image is active or queued. The upload checks that nothing is stored for the ID only once it holds the claim, which is what keeps two uploads of the same ID from both passing that check |
-| `release` | Gives up the claim an upload holds, once its job is queued or the upload failed. A release from an upload that doesn't hold the claim changes nothing |
-| `job` | A read-only peek, which reports whether a job is active, queued (with its position) or recently finished, along with the hash of the subject that started it |
-| The `check` alarm | The safety net. While a job is active it fires every minute, and at the latest after the job's deadline. It also fires after a failed start, when a claim expires, and when the oldest history entry expires |
+| `start` | Refuses a job while another job of the image is active. It also refuses a job without an upload's `source` while an upload holds the claim, since the original isn't stored yet and the job would fail with `image_not_found`; the upload's own job carries `source`. Otherwise it mints a UUIDv7 job ID, records the job as active, and starts its workflow. A job whose workflow can't be started isn't accepted, so the caller finds out at once |
+| `finished` | Called by the workflow when it ends, it moves the active job to the history, which frees the image for its next job. A call about a job that isn't active is a repeat, and changes nothing |
+| `claim` | Holds the image's ID for an upload that named it, until the upload releases it or the claim expires (`server.readTimeout` plus a minute). It refuses when another upload holds the ID, or when a job of the image is active. The upload checks that nothing is stored for the ID only once it holds the claim, which is what keeps two uploads of the same ID from both passing that check |
+| `release` | Gives up the claim an upload holds, once its job has started or the upload failed. A release from an upload that doesn't hold the claim changes nothing |
+| `job` | A read-only peek, which reports whether a job is active or recently finished, along with the hash of the subject that started it |
+| The `check` alarm | The safety net. While a job is active it fires every minute, and at the latest after the job's deadline. It also fires when a claim expires, and when the oldest history entry expires |
 
-The actor schedules its alarm, then records a job as active along with its request, and only then starts its workflow. If the process dies before the start, the actor is left holding an active job whose workflow doesn't exist, and the alarm is already there to find it. `heal` runs on every `enqueue`, `claim` and alarm, and reads the active job's journal. It moves on when the workflow has ended. When the workflow doesn't exist and its journal can't have been purged yet (less than `actors.completedWorkflowRetention` has passed since the job became active, going by the shorter of the retention recorded on the job when it became active and the current one, since raising it doesn't bring back a purged journal), the workflow was never started, so `heal` starts it from the kept request; a start that did happen after all is found by its job ID and discarded. Otherwise the job is freed. The request is dropped from the state once the workflow is known to exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
+The actor schedules its alarm, then records a job as active along with its request, and only then starts its workflow. If the process dies before the start, the actor is left holding an active job whose workflow doesn't exist, and the alarm is already there to find it. `heal` runs on every `start`, `claim` and alarm, and reads the active job's journal. It moves on when the workflow has ended. When the workflow doesn't exist and its journal can't have been purged yet (less than `actors.completedWorkflowRetention` has passed since the job became active, going by the shorter of the retention recorded on the job when it became active and the current one, since raising it doesn't bring back a purged journal), the workflow was never started, so `heal` starts it from the kept request; a start that did happen after all is found by its job ID and discarded. Otherwise the job is freed. The request is dropped from the state once the workflow is known to exist. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it.
 
-Polling the active job every minute is what bounds a lost release: if the workflow's `release` step gives up, the next job waits for the next check rather than for the job's deadline.
+The image stays busy until the job's `release` step, which comes after `notify`, so a job whose webhook delivery is being retried holds the image until the delivery succeeds or runs out of attempts. Polling the active job every minute is what bounds a lost release: if the `release` step gives up, the image is freed at the next check rather than at the job's deadline.
 
-The actor holds the queue itself, rather than starting every job as a workflow parked on a `WaitForEvent` step, for two reasons. Francis counts a workflow's waiting time against its deadline. And `RaiseEvent` records nothing when it arrives before the wait step is open, while its idempotency key makes raising it again unreliable, so a "your turn" event could be lost.
-
-The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, queued, remembered or claimed deletes its state, so the actors of every image ever uploaded don't accumulate.
+The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, remembered or claimed deletes its state, so the actors of every image ever uploaded don't accumulate.
 
 ## Workflow definition
 
@@ -35,18 +33,18 @@ A job's workflow instance ID is `<namespace>:<imageId>:<jobId>`. Binding the ins
 
 ```mermaid
 flowchart LR
-    QUEUE(["provino-image<br/>job's turn"]) --> SNAPSHOT
+    START(["provino-image<br/>image is free"]) --> SNAPSHOT
     SNAPSHOT["snapshot<br/>record the manifest, check the original exists"] --> PREPARE
     PREPARE["prepare<br/>read source size, plan reuse and skips"] --> GENERATE
     GENERATE["generate<br/>ForEach variant, fail fast"] --> MANIFEST
     MANIFEST["manifest<br/>write the completed manifest"] --> NOTIFY
     NOTIFY["notify<br/>optional webhook"] --> CLEANUP
     CLEANUP["cleanup<br/>remove local source"] --> RELEASE
-    RELEASE["release<br/>optional, start the next job"] --> DONE(["completed"])
+    RELEASE["release<br/>optional, free the image"] --> DONE(["completed"])
     GENERATE -. task fails .-> UNDO_GENERATE["compensate generate<br/>delete new files the previous manifest doesn't list"]
     MANIFEST -. step fails .-> UNDO_MANIFEST["compensate manifest<br/>put back the manifest the job found"]
     UNDO_MANIFEST --> UNDO_GENERATE
-    UNDO_GENERATE --> UNDO_SNAPSHOT["compensate snapshot<br/>release the queue, send image.failed, remove local source"]
+    UNDO_GENERATE --> UNDO_SNAPSHOT["compensate snapshot<br/>free the image, send image.failed, remove local source"]
     SNAPSHOT -. step fails .-> UNDO_SNAPSHOT
     UNDO_SNAPSHOT --> FAILED(["failed"])
 ```
@@ -57,13 +55,13 @@ flowchart LR
 | `prepare` | Plain step | Returns no items for a job without variants. Otherwise it learns the source's size (from the snapshot or the source's header) and marks two kinds of variant. A box the source can't fill is skipped when a tighter box of the same fit and format produces the same file, and a variant whose manifest entry and stored file still match is reusable. It prefetches the source only when something is left to encode. |
 | `generate` | `ForEach` with `FailFast` and task compensation | Returns at once for a skipped item, returns stored metadata for a reusable one, or reads the source through the local cache, encodes one variant, stores it, and returns a `VariantResult`. An empty fan-out completes on its own. |
 | `manifest` | Required step, compensated also when it fails | Builds the `provino/v1` manifest from the durable outputs, with the full object key of every file, and writes it. A job without variants writes nothing, because the upload already stored the manifest, and returns the manifest it found. This step is the workflow's output. |
-| `notify` | Optional step | Delivers `image.stored` (no variants) or `image.optimized` to the endpoint the job resolved when it was queued. Exhausted retries are recorded by Francis and don't fail the job. |
+| `notify` | Optional step | Delivers `image.stored` (no variants) or `image.optimized` to the endpoint the job resolved when it was requested. Exhausted retries are recorded by Francis and don't fail the job. |
 | `cleanup` | Step that can't fail | Removes this host's cached source and records the outcome metric. |
-| `release` | Optional step | Tells the image's queue the job is done. If it can't, the actor's alarm notices on its own, within a minute. |
+| `release` | Optional step | Tells the image's actor the job is done, which frees the image for its next job. If it can't, the actor's alarm notices on its own, within a minute. |
 
 Every step after `manifest` is optional or can't fail, so a job whose variants are stored never unwinds them because a notification or a local cleanup went wrong.
 
-The job service maps Francis' journal onto the job status: a queued job (known only to the actor) reads as `queued`, a running, suspended or compensating instance as `running`, a completed instance as `completed`, and a failed or cancelled one as `failed`, with its cause as the error.
+The job service maps Francis' journal onto the job status: a running, suspended or compensating instance reads as `running`, as does an active job whose journal doesn't exist yet, a completed instance as `completed`, and a failed or cancelled one as `failed`, with its cause as the error.
 
 ## Durable data flow
 
@@ -106,13 +104,13 @@ A failed job leaves the image as it found it:
 
 1. `generate`'s compensation deletes the files this job stored, except any the previous manifest still lists. Re-encoding a size and format overwrites the same key, so deleting it would break the manifest that's about to be put back. Keeping an orphaned file is the harmless mistake, so a compensation that can't read the snapshot keeps the file.
 2. `manifest`'s compensation, which also runs when the step itself failed partway, puts back the manifest the job found, or removes it when there was none.
-3. `snapshot`'s compensation runs last. It releases the image's queue first, so a failure event that can't be delivered doesn't hold up the next job. It then delivers `image.failed`, carrying the manifest the image is left with, and removes the local source. It tries the delivery up to five times and then gives up, so an unreachable endpoint can't stall the unwind.
+3. `snapshot`'s compensation runs last. It frees the image first, so a failure event that can't be delivered doesn't hold up the next job. It then delivers `image.failed`, carrying the manifest the image is left with, and removes the local source. It tries the delivery up to five times and then gives up, so an unreachable endpoint can't stall the unwind.
 
 Generation tells failures apart by whether another attempt could help. Invalid requests and unreadable sources fail permanently, while storage and network failures use Francis' attempt and backoff policy.
 
 ## Deadlines, placement and retention
 
-Each forward attempt and compensation uses `actors.workflowTimeout` as its execution budget, which starts only when a worker begins the attempt. The workflow also has an instance deadline of six times that value. A job's wait in its image's queue happens before its workflow exists, so it counts against neither.
+Each forward attempt and compensation uses `actors.workflowTimeout` as its execution budget, which starts only when a worker begins the attempt. The workflow also has an instance deadline of six times that value.
 
 `images.maxConcurrentEncodes` becomes the workflow's per-host worker budget, which Francis shares across every step's queue and mirrors as a placement hint, so work can move to another host.
 

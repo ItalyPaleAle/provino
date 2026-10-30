@@ -1,13 +1,13 @@
 # provino
 
-provino is a high-performance HTTP service that stores the images your users upload and turns each one into the set of variants your application needs: the formats, sizes and crops you ask for.
+provino is a high-performance HTTP service that stores the images your users upload and turns each one into the set of variants your application needs.
 
 - **Browsers upload directly.** An upload goes straight from the browser to provino, and an *authorizer* you control (an HTTP endpoint you run, or a static block in the config) decides its namespace, how large it may be, and which variants to generate.
 - **Backends upload and re-render.** A trusted backend can upload images and ask for new variants of existing ones through the client API.
 - **One or more replicas.** provino is built on the [Francis](https://gofrancis.dev) actor framework, so it can run as a single instance or scale out to many replicas to handle more concurrent requests.
 - **Durable workflows.** Every upload and every request for variants runs as a durable workflow built on Francis. A workflow survives a restart of the service, and a job that fails undoes the changes it made.
 - **Signed webhooks.** A job reports its outcome to the endpoints named in the configuration, signed following the [Standard Webhooks](https://www.standardwebhooks.com) specification (HMAC or Ed25519), or authenticated with an OAuth2 client-credentials token.
-- **Your storage.** Originals and variants live in the object store you choose, next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, usually through a CDN. Supported storages:
+- **Your storage.** Originals and variants live in the object store you choose, next to a manifest that lists every file by its key. provino doesn't serve images: you serve them from the store, e.g. with a CDN. Supported storages:
    - Local file system
    - AWS S3 or S3-compatible endpoints
    - Vercel Blob
@@ -29,15 +29,15 @@ sequenceDiagram
     A-->>P: namespace, image ID, limits, variants, notify
     P->>S: Store the original and its manifest
     P-->>B: 202 Accepted (job ID)
-    Note over P: The job waits for its image's queue, then runs
+    Note over P: The job generates the variants
     P->>S: Store the variants and the completed manifest
     P->>W: image.optimized (signed)
     B->>P: GET /v1/public/images/.../jobs/{jobId}
 ```
 
-A backend does the same through `POST /v1/client/upload`, without the authorizer, and asks for new variants of an existing image with `POST /v1/client/optimize`.
+A backend does the same through `POST /v1/client/upload` (without the authorizer) and asks for new variants of an existing image with `POST /v1/client/optimize`.
 
-Every image belongs to a namespace, a short name that is the first segment of every object key: a tenant, a site, or `default`. The objects of an image are stored under `<namespace>/<id[0:2]>/<id[2:4]>/`, which spreads a namespace's images across 65,536 folders instead of piling them into one.
+Every image belongs to a namespace, a short name that is the first segment of every object key: a tenant, a site, or `default`. The objects of an image are stored under `<namespace>/<id[0:2]>/<id[2:4]>/`, spreading it into sub-folders for performance.
 
 ## Quick start
 
@@ -80,7 +80,7 @@ storage:
 curl -s http://127.0.0.1:3000/v1/public/ingest \
   -H "Authorization: Bearer pvk_dev_0123456789abcdefghijklmnop" \
   -F 'image=@photo.jpg'
-# {"namespace":"default","imageId":"...","jobId":"...","status":"queued",...}
+# {"namespace":"default","imageId":"...","jobId":"...","status":"running",...}
 
 curl -s http://127.0.0.1:3000/v1/client/images/default/<imageId>/jobs/<jobId> \
   -H "Authorization: Bearer pvk_dev_0123456789abcdefghijklmnop"
@@ -90,7 +90,7 @@ Once the job completes, the manifest at `data/variants/default/<id[0:2]>/<id[2:4
 
 ## API
 
-The OpenAPI document is served at `/.openapi`, and as `/.openapi/provino.json` and `/.openapi/provino.yaml`.
+The OpenAPI document is served at `/.openapi` and as `/.openapi/provino.json` and `/.openapi/provino.yaml`.
 
 | Route | Who calls it | Purpose |
 | --- | --- | --- |
@@ -103,13 +103,15 @@ The OpenAPI document is served at `/.openapi`, and as `/.openapi/provino.json` a
 | `GET /healthz` | Health checks | Liveness: the process answers |
 | `GET /readyz` | Health checks | Readiness: the actor host is registered and jobs can run |
 
-Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job is queued.
+Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job has started. The jobs of an image run one at a time, so a request for an image that has another job running gets `409 image_busy`, and can be sent again once that job has finished.
 
 - An upload is `multipart/form-data`, with the `metadata` part before the `image` part, so provino can stream the image straight to the store.
 - A variant looks like `{"format": "webp", "quality": 80, "effort": 5, "size": {"width": 1200, "height": 400}, "fit": "contain"}`. Its format is `webp`, `avif`, `jpeg` or `png`, and its fit is `contain` (the default) or `cover`.
 - A source can be JPEG, PNG, WebP, AVIF or HEIC/HEIF.
 
-Callers authenticate with a JWT from an OpenID Connect provider, with an API key, or with nothing at all in development. Only the public routes answer cross-origin requests, from the origins in `server.corsAllowedOrigins`.
+Callers authenticate with a JWT from an OpenID Connect provider or with an API key.
+
+CORS is available on public routes to cross-origin requests, from the origins in `server.corsAllowedOrigins`.
 
 ## Documentation
 

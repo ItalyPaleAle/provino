@@ -3,8 +3,11 @@ package signing
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -61,46 +64,89 @@ func TestHMACIsVerifiedByTheReceiverLibrary(t *testing.T) {
 	assert.Equal(t, "msg_1", req.Header.Get(webhook.HeaderID))
 }
 
+// Encode a private key in each of the forms the configuration accepts
+func keyForms(t *testing.T, private ed25519.PrivateKey) (pemKey string, whsk string, jwk string) {
+	t.Helper()
+
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	require.NoError(t, err)
+	public, _ := private.Public().(ed25519.PublicKey)
+
+	pemKey = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	whsk = "whsk_" + base64.StdEncoding.EncodeToString(private.Seed())
+	jwk = `{"kty":"OKP","crv":"Ed25519","x":"` + base64.RawURLEncoding.EncodeToString(public) + `","d":"` + base64.RawURLEncoding.EncodeToString(private.Seed()) + `"}`
+	return pemKey, whsk, jwk
+}
+
+// Add a kid to a JWK
+func withKid(jwk string, kid string) string {
+	return jwk[:len(jwk)-1] + `,"kid":"` + kid + `"}`
+}
+
 func TestEd25519KeySet(t *testing.T) {
-	_, active, err := ed25519.GenerateKey(rand.Reader)
+	activePublic, active, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	retired, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// The active key comes from a file, the retired one inline, which covers both ways of configuring a key
-	activePath := filepath.Join(t.TempDir(), "active.key")
-	err = os.WriteFile(activePath, []byte("whsk_"+base64.StdEncoding.EncodeToString(active.Seed())), 0o600)
+	previousPublic, previous, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	keys, err := LoadKeySet(config.ConfigSigningEd25519{
-		ActiveKey: "2026-10",
-		Keys: []config.ConfigSigningKey{
-			{ID: "2026-10", PrivateKeyFile: activePath},
-			{ID: "2026-01", PublicKey: webhook.EncodeEd25519PublicKey(retired)},
-		},
-	})
+	// The first key is a JWK with its own kid and the second is in the Standard Webhooks form, which has none, so the set covers both ways a key gets its ID
+	_, _, activeJWK := keyForms(t, active)
+	_, previousWHSK, _ := keyForms(t, previous)
+	keys, err := LoadKeySet(config.ConfigSigningEd25519{Keys: []string{withKid(activeJWK, "2026-10"), previousWHSK}})
 	require.NoError(t, err)
 	assert.Equal(t, "2026-10", keys.ActiveKeyID())
 
-	// The published set holds both keys, and a receiver that fetched it verifies requests signed with the active one
+	// The published set holds both keys, the second under the ID derived from its public key
 	jwks, err := keys.JWKS()
 	require.NoError(t, err)
 	var set webhook.JWKS
 	err = json.Unmarshal(jwks, &set)
 	require.NoError(t, err)
 	require.Len(t, set.Keys, 2)
+	assert.Equal(t, "2026-10", set.Keys[0].Kid)
+	sum := sha256.Sum256(previousPublic)
+	assert.Equal(t, base64.RawURLEncoding.EncodeToString(sum[:7]), set.Keys[1].Kid)
 	published, err := set.Ed25519Keys()
 	require.NoError(t, err)
+	assert.Equal(t, activePublic, published[0])
 
+	// Requests are signed with the first key, so a receiver that trusts only that one verifies them
 	a, err := New(config.ConfigOutboundAuth{Type: config.OutboundAuthEd25519}, keys, time.Second)
 	require.NoError(t, err)
 	msg := testMessage()
 	req := apply(t, a, msg)
 
-	v, err := webhook.NewVerifier(t.Context(), webhook.WithEd25519PublicKeys(published...))
+	v, err := webhook.NewVerifier(t.Context(), webhook.WithEd25519PublicKeys(activePublic))
 	require.NoError(t, err)
 	err = v.Verify(t.Context(), req.Header, msg.Body)
 	require.NoError(t, err)
+}
+
+func TestEd25519KeyIDs(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pemKey, whsk, jwk := keyForms(t, private)
+
+	// A key without a kid gets the same ID whichever form it's written in, so converting it doesn't change what receivers see
+	ids := make([]string, 0, 3)
+	for _, value := range []string{pemKey, whsk, jwk} {
+		keys, err := LoadKeySet(config.ConfigSigningEd25519{Keys: []string{value}})
+		require.NoError(t, err)
+		ids = append(ids, keys.ActiveKeyID())
+	}
+	assert.Len(t, ids[0], 10)
+	assert.Equal(t, []string{ids[0], ids[0], ids[0]}, ids)
+
+	// The same key listed twice, even in two forms, would be published twice under one ID
+	_, err = LoadKeySet(config.ConfigSigningEd25519{Keys: []string{pemKey, whsk}})
+	require.ErrorContains(t, err, "same ID")
+
+	// Two different keys can't share a kid either
+	_, other, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_, _, otherJWK := keyForms(t, other)
+	_, err = LoadKeySet(config.ConfigSigningEd25519{Keys: []string{withKid(jwk, "k1"), withKid(otherJWK, "k1")}})
+	require.ErrorContains(t, err, "same ID")
 }
 
 func TestLoadKeySetWithoutKeys(t *testing.T) {

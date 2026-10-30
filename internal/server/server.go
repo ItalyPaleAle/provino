@@ -77,7 +77,7 @@ type NewServerOpts struct {
 	AppMetrics    *metrics.AppMetrics
 	TraceProvider *trace.TracerProvider
 
-	// Jobs queues jobs and reads their status
+	// Jobs starts jobs and reads their status
 	Jobs actors.Jobs
 	// Francis rate limiter protecting browser uploads
 	RateLimiter RateLimiter

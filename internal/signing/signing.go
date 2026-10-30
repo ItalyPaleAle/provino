@@ -6,13 +6,14 @@ package signing
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -219,59 +220,53 @@ func LoadKeySet(cfg config.ConfigSigningEd25519) (*KeySet, error) {
 		return nil, nil //nolint:nilnil // A nil key set means none is configured, which is a valid deployment
 	}
 
-	ks := &KeySet{activeID: cfg.ActiveKey, public: make([]webhook.JWK, 0, len(cfg.Keys))}
-	for _, key := range cfg.Keys {
-		public, private, err := loadKey(key)
+	ks := &KeySet{
+		public: make([]webhook.JWK, 0, len(cfg.Keys)),
+	}
+	ids := make(map[string]int, len(cfg.Keys))
+	for i, value := range cfg.Keys {
+		private, err := webhook.ParseEd25519PrivateKey(value)
 		if err != nil {
-			return nil, fmt.Errorf("signing key '%s': %w", key.ID, err)
+			return nil, fmt.Errorf("signing key %d is invalid: %w", i, err)
 		}
-		if key.ID == cfg.ActiveKey {
+		public, _ := private.Public().(ed25519.PublicKey)
+
+		// Receivers can look keys up by ID, so two keys published with the same one would be ambiguous, and so would the same key listed twice
+		id := keyID(value, public)
+		other, found := ids[id]
+		if found {
+			return nil, fmt.Errorf("signing keys %d and %d have the same ID '%s'", other, i, id)
+		}
+		ids[id] = i
+
+		// The first key signs, and every key is published, so receivers can trust a new key before it moves to the top and an old one until it's removed
+		if i == 0 {
+			ks.activeID = id
 			ks.active = private
 		}
-		ks.public = append(ks.public, webhook.NewEd25519JWK(key.ID, public))
-	}
-	if ks.active == nil {
-		return nil, fmt.Errorf("the active signing key '%s' has no private key", cfg.ActiveKey)
+		ks.public = append(ks.public, webhook.NewEd25519JWK(id, public))
 	}
 
 	return ks, nil
 }
 
-// Read one key from the configuration or from the file it names, returning the private key too when there is one
-func loadKey(key config.ConfigSigningKey) (ed25519.PublicKey, ed25519.PrivateKey, error) {
-	read := func(value string, path string) (string, error) {
-		if value != "" {
-			return value, nil
+// Return the ID a key is published with: the `kid` of a JWK that has one, or else one derived from the public key
+// The derived ID is stable for as long as the key is configured, whatever form it's written in, so receivers that cache the key set by ID keep finding it
+func keyID(value string, public ed25519.PublicKey) string {
+	// The value already parsed as a key, so a JSON object here is a valid JWK
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "{") {
+		var jwk struct {
+			Kid string `json:"kid"`
 		}
-		data, err := os.ReadFile(path) //nolint:gosec // The path comes from the operator's configuration
-		if err != nil {
-			return "", fmt.Errorf("failed to read '%s': %w", path, err)
+		err := json.Unmarshal([]byte(value), &jwk)
+		if err == nil && jwk.Kid != "" {
+			return jwk.Kid
 		}
-		return string(data), nil
 	}
 
-	if key.PrivateKey != "" || key.PrivateKeyFile != "" {
-		value, err := read(key.PrivateKey, key.PrivateKeyFile)
-		if err != nil {
-			return nil, nil, err
-		}
-		private, err := webhook.ParseEd25519PrivateKey(value)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid private key: %w", err)
-		}
-		public, _ := private.Public().(ed25519.PublicKey)
-		return public, private, nil
-	}
-
-	value, err := read(key.PublicKey, key.PublicKeyFile)
-	if err != nil {
-		return nil, nil, err
-	}
-	public, err := webhook.ParseEd25519PublicKey(value)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid public key: %w", err)
-	}
-	return public, nil, nil
+	sum := sha256.Sum256(public)
+	return base64.RawURLEncoding.EncodeToString(sum[:7])
 }
 
 // ActiveKeyID returns the ID of the key requests are signed with

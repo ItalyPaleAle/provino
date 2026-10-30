@@ -37,9 +37,6 @@ type Request struct {
 	Subject string
 	// Opaque context the caller sent in the upload's metadata
 	Context json.RawMessage
-	// What the caller said about the file
-	FileName    string
-	ContentType string
 }
 
 // Decision is the authorizer's answer about an upload it allows, validated
@@ -147,7 +144,6 @@ func (a *httpAuthorizer) Authorize(ctx context.Context, req Request) (Decision, 
 		Version: webhook.AuthorizeVersion,
 		Subject: req.Subject,
 		Context: req.Context,
-		File:    webhook.AuthorizeFile{Name: req.FileName, ContentType: req.ContentType},
 	})
 	if err != nil {
 		return Decision{}, fmt.Errorf("failed to encode the authorization request: %w", err)

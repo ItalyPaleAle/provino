@@ -25,10 +25,10 @@ import (
 const maxClientRequestSize = 64 << 10 // 64KB
 
 // RouteUpload is the handler for "POST /v1/client/upload"
-// It stores an image a trusted backend uploads and queues the job that generates its variants
+// It stores an image a trusted backend uploads and starts the job that generates its variants
 //
 //	@Summary		Upload an image from a backend
-//	@Description	Accepts a multipart body with a `metadata` part, a JSON object naming the namespace and optionally the image ID, the variants and the notification, followed by the `image` part. The image's format is detected from its content. The response is sent once the original is stored and its job is queued.
+//	@Description	Accepts a multipart body with a `metadata` part, a JSON object naming the namespace and optionally the image ID, the variants and the notification, followed by the `image` part. The image's format is detected from its content. The response is sent once the original is stored and its job has started.
 //	@Tags			client
 //	@Accept			multipart/form-data
 //	@Produce		json
@@ -92,7 +92,7 @@ func (s *Server) RouteUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, err := s.enqueueUpload(ctx, in, source)
+	accepted, err := s.startUpload(ctx, in, source)
 	if err != nil {
 		s.respondWithError(w, r, err)
 		return
@@ -149,10 +149,10 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 }
 
 // RouteOptimize is the handler for "POST /v1/client/optimize"
-// It queues a job that generates variants for an image already in storage
+// It starts a job that generates variants for an image already in storage
 //
 //	@Summary		Generate variants for an existing image
-//	@Description	Queues a job for an image that is already stored. Send every variant the image should have, including the ones it already has: stored files that still match are reused, boxes the original can't fill are skipped, and the rest are encoded. The request is validated and queued without touching storage, so an image that doesn't exist makes the job fail with `image_not_found` rather than this request. An image that an upload naming its ID is still storing is refused with `409 upload_in_progress`, and can be sent again once the upload has returned.
+//	@Description	Starts a job for an image that is already stored. Send every variant the image should have, including the ones it already has: stored files that still match are reused, boxes the original can't fill are skipped, and the rest are encoded. The request is validated and the job started without touching storage, so an image that doesn't exist makes the job fail with `image_not_found` rather than this request. The jobs of an image run one at a time, so an image that has another job running, or that an upload naming its ID is still storing, is refused with `409 image_busy`, and the request can be sent again once that job has finished or the upload has returned.
 //	@Tags			client
 //	@Accept			json
 //	@Produce		json
@@ -163,7 +163,6 @@ func (s *Server) validateUploadMetadata(metadata client.UploadMetadata) (upload,
 //	@Failure		401		{object}	client.Error
 //	@Failure		403		{object}	client.Error
 //	@Failure		409		{object}	client.Error
-//	@Failure		429		{object}	client.Error
 //	@Router			/v1/client/optimize [post]
 func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -220,7 +219,7 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.jobs.Enqueue(ctx, actors.JobRequest{
+	jobID, err := s.jobs.Start(ctx, actors.JobRequest{
 		Namespace:    req.Namespace,
 		ImageID:      imageID.String(),
 		SourceFormat: sourceFormat,
@@ -229,11 +228,8 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 		RequestedAt:  time.Now(),
 	})
 	switch {
-	case errors.Is(err, actors.ErrQueueFull):
-		errQueueFull.WriteResponse(w, r)
-		return
-	case errors.Is(err, actors.ErrUploadInProgress):
-		errUploadInProgress.WriteResponse(w, r)
+	case errors.Is(err, actors.ErrImageBusy):
+		errImageBusy.WriteResponse(w, r)
 		return
 	case err != nil:
 		s.respondWithError(w, r, err)
@@ -243,9 +239,8 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 	respondAccepted(w, r, client.JobAccepted{
 		Namespace:   req.Namespace,
 		ImageID:     imageID.String(),
-		JobID:       res.JobID,
-		Status:      client.JobQueued,
-		Position:    res.Position,
+		JobID:       jobID,
+		Status:      client.JobRunning,
 		ManifestKey: s.store.ManifestKey(req.Namespace, imageID),
 	})
 }

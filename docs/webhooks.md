@@ -1,6 +1,6 @@
 # Webhooks
 
-A job can report its outcome to your application with a webhook. Endpoints are named in the configuration, and whatever starts the job picks one by name: the authorizer's answer for a browser upload, or the `notify` object of a client upload or optimize request. No URL ever comes from a request, so there is nothing a caller can point provino at.
+A job can report its outcome to your application with a webhook. Endpoints are named in the configuration, and whatever starts the job picks one by name: the authorizer's answer for a browser upload or the `notify` object of a client upload or optimize request.
 
 ```yaml
 notify:
@@ -52,11 +52,11 @@ The body follows the Standard Webhooks payload structure:
 
 - `data.manifest` is the manifest the job wrote. On `image.failed` it's the manifest the image is left with, which is absent when the image had none.
 - `data.error` is set on `image.failed`. It starts with `image_not_found` when the image's original doesn't exist.
-- `timestamp` is when the event happened, and it stays the same across delivery attempts: when the job completed, or for `image.failed`, when its failure freed the image's queue.
+- `timestamp` is when the event happened, and it stays the same across delivery attempts: when the job completed, or for `image.failed`, when its failure freed the image for its next job.
 
 ## Delivery
 
-Delivery is a step of the job's durable workflow. A `2xx` response acknowledges an event, and any other answer is retried with backoff. Redirects aren't followed, so a `3xx` counts as a failed attempt.
+Delivery is a step of the job's durable workflow. The app must respond with a `2xx` status code. Provino automatically retries webhook deliveries after a failure.
 
 A job whose variants are stored completes even if its event is never acknowledged, since the outcome is also in the manifest. An `image.failed` event is retried up to five times while the job unwinds, and then dropped.
 
@@ -73,7 +73,7 @@ auth:
   type: hmac
   hmac:
     # Every listed secret signs, so a receiver can rotate by adding the new secret here first, then removing the old one once it has switched
-    secrets: [whsec_new..., whsec_old...]
+    secrets: [whsec_123_new..., whsec_234_old...]
 ```
 
 The request carries `webhook-signature: v1,<base64 HMAC-SHA256>`, with one `v1,` entry per secret, separated by spaces. The signature covers `<webhook-id>.<webhook-timestamp>.<body>`, using the bytes after `whsec_` decoded from base64 as the key. Generate a secret with:
@@ -87,30 +87,44 @@ echo "whsec_$(openssl rand -base64 32)"
 ```yaml
 auth:
   type: ed25519
-signing:
-  ed25519:
-    activeKey: 2026-10
-    keys:
-      - id: 2026-10
-        privateKeyFile: /etc/provino/webhook-2026-10.pem
-      # A retired key: still published, no longer used to sign
-      - id: 2026-01
-        publicKeyFile: /etc/provino/webhook-2026-01.pub.pem
 ```
 
-The request carries `webhook-signature: v1a,<base64 Ed25519 signature>`, made with the active key over the same content as an HMAC signature.
+The request carries `webhook-signature: v1a,<base64 Ed25519 signature>`, over the same content as an HMAC signature. provino signs it with a private key, and receivers verify it with the matching public key.
 
-Receivers need only the public keys, and provino publishes every configured key, active or retired, as a JWKS at `/.well-known/provino-keys.json`. To rotate:
+The keys aren't part of `auth`. They're in the top-level `signing` section, shared by every endpoint, and by the authorizer, whose `auth.type` is `ed25519`:
 
-1. Add the new key.
-2. Make it active once receivers have refreshed the set.
+```yaml
+signing:
+  ed25519:
+    keys:
+      # The first key signs every request
+      - !file /etc/provino/webhook-2026-10.pem
+      # The previous key: still published, but no longer used to sign
+      - !file /etc/provino/webhook-2026-01.pem
+```
+
+`keys` is a list of private keys. Every request is signed with the first one, and the others are only published.
+
+`!file <path>` reads a value from a file, so the key stays out of the configuration file, and a relative path is resolved against the folder that holds the configuration file. A key could also be written in the configuration itself.
+
+Receivers need only the public keys. provino derives each key's public key from its private key, and publishes every configured key as a JWKS at `/.well-known/provino-keys.json`. To rotate:
+
+1. Add the new key at the end of the list.
+2. Move it to the top once receivers have refreshed the set.
 3. Later, remove the old one.
 
-Keys are PEM-encoded (PKCS #8 for private keys, PKIX for public keys) or in the Standard Webhooks `whsk_...` and `whpk_...` forms:
+A key can be in any of these forms:
+
+- PEM-encoded PKCS #8 (as OpenSSL writes it)
+- A JWK: a JSON object with `"kty": "OKP"`, `"crv": "Ed25519"`, and the key's `x` and `d`. A key set (e.g. `{"keys": [...]}`)  is not accepted
+- The form the [Standard Webhooks](https://www.standardwebhooks.com/) specification defines: `whsk_` followed by the base64 of the key, which is either its 32-byte seed or the 64-byte form that ends with the public key.
+
+Each key is published with an ID, its `kid`. A JWK that has a `kid` keeps it. Any other key gets one derived from its public key: the first 7 bytes of its SHA-256, base64url-encoded, such as `KuHYNFa2kw`. The derived ID is the same whichever form the key is written in. Two keys can't have the same ID, so the same key can't be listed twice.
+
+To generate a key with OpenSSL:
 
 ```sh
 openssl genpkey -algorithm ed25519 -out webhook-2026-10.pem
-openssl pkey -in webhook-2026-10.pem -pubout -out webhook-2026-10.pub.pem
 ```
 
 ### `oauth2`
@@ -147,7 +161,7 @@ Instead of a client secret, provino can authenticate to the token endpoint with 
 | `AzureWorkloadIdentity` | Azure Workload Identity, for example in Kubernetes |
 | `KubernetesServiceAccountToken` | A projected service account token at `/var/run/secrets/kubernetes.io/serviceaccount/token`, read again for every token request so a rotated token is picked up |
 | `KubernetesServiceAccountToken=<path>` | A projected token at another path |
-| `tsiam=<endpoint>` | A token from tsiam on a Tailscale network, which also needs `clientAssertionAudience` to name the resource to request |
+| `tsiam=<endpoint>` | A token from [tsiam](https://tsiam.italypaleale.me/) on a Tailscale network, which also needs `clientAssertionAudience` to name the resource to request |
 
 ### `none`
 
@@ -169,7 +183,7 @@ Verify a request before trusting anything in it:
 
 ### Go
 
-The `webhook` package implements all of it. `HandleEvent` returns a handler that verifies the request, answering `401` when no signature matches, then decodes the event, passes it to your callback along with the request, and answers `204`:
+The `webhook` package implements all of the above. `HandleEvent` returns a handler that verifies the request, answering `401` when no signature matches, then decodes the event, passes it to your callback along with the request, and answers `204`:
 
 ```go
 import "github.com/italypaleale/provino/webhook"
@@ -194,7 +208,7 @@ http.HandleFunc("POST /hooks/provino", webhook.HandleEvent(verifier, func(r *htt
 }))
 ```
 
-An error from the callback answers `500`, so provino retries the delivery. The error itself isn't sent, so log it in the callback. For an event type it doesn't know, the callback should return `nil`, because a newer provino may send more.
+An error from the callback answers `500`, so provino retries the delivery. The error itself is not sent, so log it in the callback. For an event type it doesn't know, the callback should return `nil`, because a newer provino may send more.
 
 #### With OAuth2
 

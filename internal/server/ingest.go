@@ -15,10 +15,10 @@ import (
 )
 
 // RouteIngest is the handler for "POST /v1/public/ingest"
-// It stores an image a browser uploads, as the authorizer decides, and queues the job that generates its variants
+// It stores an image a browser uploads, as the authorizer decides, and starts the job that generates its variants
 //
 //	@Summary		Upload an image from a browser
-//	@Description	Accepts a multipart body with an optional `metadata` part, whose JSON `context` is forwarded to the authorizer, followed by the `image` part. The authorizer decides the namespace, the image ID, the size limit, the accepted formats, the variants and the notification. The image's format is detected from its content. The response is sent once the original is stored and its job is queued.
+//	@Description	Accepts a multipart body with an optional `metadata` part, whose JSON `context` is forwarded to the authorizer, followed by the `image` part. The authorizer decides the namespace, the image ID, the size limit, the accepted formats, the variants and the notification. The image's format is detected from its content. The response is sent once the original is stored and its job has started.
 //	@Tags			public
 //	@Accept			multipart/form-data
 //	@Produce		json
@@ -73,10 +73,8 @@ func (s *Server) RouteIngest(w http.ResponseWriter, r *http.Request) {
 
 	// The authorizer decides everything about the upload, at the moment of the upload, so a revoked permission or a changed policy applies to the next one
 	decision, err := s.authorizer.Authorize(ctx, authorizer.Request{
-		Subject:     principal.Subject,
-		Context:     metadata.Context,
-		FileName:    part.FileName(),
-		ContentType: part.Header.Get(httpserver.HeaderContentType),
+		Subject: principal.Subject,
+		Context: metadata.Context,
 	})
 	if errors.Is(err, authorizer.ErrRefused) {
 		// The refusal is the authorizer's decision, which is logged so an operator can tell it apart from a failure without asking the authorizer
@@ -125,7 +123,7 @@ func (s *Server) RouteIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, err := s.enqueueUpload(ctx, in, source)
+	accepted, err := s.startUpload(ctx, in, source)
 	if err != nil {
 		s.respondWithError(w, r, err)
 		return

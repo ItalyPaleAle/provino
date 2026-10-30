@@ -14,7 +14,7 @@ import (
 
 // Methods of the image actor
 const (
-	methodEnqueue  = "enqueue"
+	methodStart    = "start"
 	methodFinished = "finished"
 	methodClaim    = "claim"
 	methodRelease  = "release"
@@ -25,20 +25,18 @@ const (
 // Bounds on the jobs the actor remembers after they finish, which it keeps only so a browser can read the status of its own jobs
 const (
 	maxHistory = 50
-	// A start that failed is retried this long after, so a briefly unavailable runtime doesn't leave the queue stuck until the next request
-	retryStartAfter = 30 * time.Second
-	// How often the actor looks at a running job, so one whose release never arrived holds up the jobs behind it for a minute rather than until its deadline
+	// How soon the actor checks on a job it's about to start, so a process that stops before the workflow starts leaves an alarm behind to start it
+	checkStartAfter = 30 * time.Second
+	// How often the actor looks at a running job, so one whose release never arrived holds the image for a minute rather than until its deadline
 	activePollInterval = time.Minute
 	// How long after its deadline an active job is checked, giving its unwind time to report back before the actor steps in
 	activeCheckMargin = time.Minute
 )
 
-// imageState is the durable state of an image's queue
+// imageState is the durable state of an image's actor
 type imageState struct {
 	// The job whose workflow is running, if any
 	Active *activeJob `json:"active,omitempty"`
-	// Jobs waiting for the active one to finish, in order
-	Queue []queuedJob `json:"queue,omitempty"`
 	// Jobs that finished recently, most recent last
 	History []finishedJob `json:"history,omitempty"`
 	// An upload that named this image's ID and is storing it right now
@@ -75,28 +73,17 @@ type activeJob struct {
 	Retention time.Duration `json:"retention,omitempty"`
 }
 
-type queuedJob struct {
-	JobID       string     `json:"jobId"`
-	SubjectHash string     `json:"subjectHash,omitempty"`
-	Request     JobRequest `json:"request"`
-	EnqueuedAt  time.Time  `json:"enqueuedAt"`
-}
-
 type finishedJob struct {
 	JobID       string    `json:"jobId"`
 	SubjectHash string    `json:"subjectHash,omitempty"`
 	FinishedAt  time.Time `json:"finishedAt"`
 }
 
-// enqueueResult is the actor's answer to an enqueue
-type enqueueResult struct {
+// startResult is the actor's answer to a start
+type startResult struct {
 	JobID string `json:"jobId"`
-	// 0 when the job started right away, its 1-based place in the queue otherwise
-	Position int `json:"position"`
-	// True when the queue was full and the job wasn't accepted
-	QueueFull bool `json:"queueFull,omitempty"`
-	// True when an upload is still storing the image, so a job that reads the original wasn't accepted
-	UploadInProgress bool `json:"uploadInProgress,omitempty"`
+	// True when another job of the image is running, or an upload is still storing it, so the job wasn't accepted
+	Busy bool `json:"busy,omitempty"`
 }
 
 // finishedRequest tells the actor a job's workflow has finished
@@ -113,13 +100,12 @@ type finishedResult struct {
 // jobLookup is what the actor knows about one job
 type jobLookup struct {
 	Found bool `json:"found"`
-	// One of "active", "queued", "finished"
+	// One of "active", "finished"
 	State       string `json:"state,omitempty"`
-	Position    int    `json:"position,omitempty"`
 	SubjectHash string `json:"subjectHash,omitempty"`
 }
 
-// Address the queue actor of one image
+// Address the actor of one image
 // The namespace can't contain a colon, so the two parts never run into each other
 func imageActorID(namespace string, imageID string) string {
 	return namespace + ":" + imageID
@@ -131,9 +117,9 @@ func jobInstanceID(namespace string, imageID string, jobID string) string {
 	return namespace + ":" + imageID + ":" + jobID
 }
 
-// imageActor serializes the jobs of one image: it holds them in a queue and starts each one's workflow when the previous one finishes
+// imageActor runs the jobs of one image one at a time: it starts a job's workflow only when no other job of the image is running, and refuses the job otherwise
 //
-// It holds the queue itself, rather than starting every job as a workflow that waits for its turn, because Francis counts a workflow's waiting time against its deadline and drops an event raised before the workflow is waiting for it
+// Every job writes the image's manifest, and a failed one puts back the manifest it found, so two jobs of one image running at once would undo each other's work
 type imageActor struct {
 	namespace string
 	imageID   string
@@ -156,16 +142,16 @@ func newImageActorFactory(rt *Runtime, jobs *jobService) actor.Factory {
 	}
 }
 
-// Invoke handles the methods that change the queue
+// Invoke handles the methods that change the image's state
 func (a *imageActor) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
 	switch method {
-	case methodEnqueue:
+	case methodStart:
 		var req JobRequest
 		err := data.Decode(&req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode the job: %w", err)
 		}
-		return a.enqueue(ctx, req)
+		return a.startJob(ctx, req)
 
 	case methodFinished:
 		var req finishedRequest
@@ -210,16 +196,11 @@ func (a *imageActor) Peek(ctx context.Context, method string, data actor.Envelop
 
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the queue: %w", err)
+		return nil, fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
 	if state.Active != nil && state.Active.JobID == req.JobID {
 		return jobLookup{Found: true, State: "active", SubjectHash: state.Active.SubjectHash}, nil
-	}
-	for i, job := range state.Queue {
-		if job.JobID == req.JobID {
-			return jobLookup{Found: true, State: "queued", Position: i + 1, SubjectHash: job.SubjectHash}, nil
-		}
 	}
 	for _, job := range state.History {
 		if job.JobID == req.JobID {
@@ -230,11 +211,11 @@ func (a *imageActor) Peek(ctx context.Context, method string, data actor.Envelop
 	return jobLookup{}, nil
 }
 
-// Alarm is the actor's safety net: it frees the queue when an active job ended without telling it, retries a start that failed, and prunes the history
+// Alarm is the actor's safety net: it frees the image when its active job ended without telling it, starts an active job whose workflow never started, and prunes the history
 func (a *imageActor) Alarm(ctx context.Context, _ string, _ actor.Envelope) error {
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read the queue: %w", err)
+		return fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
 	err = a.heal(ctx, &state)
@@ -242,78 +223,54 @@ func (a *imageActor) Alarm(ctx context.Context, _ string, _ actor.Envelope) erro
 		return err
 	}
 
-	// A failed start is retried here, and its failure is logged rather than returned, because the alarm rescheduled below retries it again
-	err = a.startNext(ctx, &state)
-	if err != nil {
-		a.runtime.Log.WarnContext(ctx, "Failed to start the next job of an image", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.Any("error", err))
-	}
-
 	return a.save(ctx, &state)
 }
 
-// Add a job to the queue, starting it right away when nothing else of the image is running
-func (a *imageActor) enqueue(ctx context.Context, req JobRequest) (enqueueResult, error) {
+// Start a job's workflow, unless another job of the image is running or an upload is still storing the image
+func (a *imageActor) startJob(ctx context.Context, req JobRequest) (startResult, error) {
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return enqueueResult{}, fmt.Errorf("failed to read the queue: %w", err)
+		return startResult{}, fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
-	// An active job that ended without telling the actor would hold the queue forever, so every enqueue checks on it
+	// An active job that ended without telling the actor would hold the image forever, so every start checks on it
 	err = a.heal(ctx, &state)
 	if err != nil {
-		return enqueueResult{}, err
+		return startResult{}, err
 	}
 
-	// An upload holding the ID with no job of its own queued yet is still storing the original, so a job that isn't that upload's would start before the original exists and fail
-	// The upload's own job is the one that carries what it learned about the original, and once it's queued, any later job waits behind it
-	uploading := state.Upload != nil && time.Now().Before(state.Upload.ExpiresAt) && state.Active == nil && len(state.Queue) == 0
-	if uploading && req.Source == nil {
+	// Only one job of an image runs at a time, so a job sent while another is running is refused rather than kept, and the caller sends it again later
+	// An upload holding the ID is still storing the original, so the only job that may start is the upload's own, which carries what it learned about the original; any other would fail with image_not_found
+	uploading := state.Upload != nil && time.Now().Before(state.Upload.ExpiresAt)
+	if state.Active != nil || (uploading && req.Source == nil) {
 		err = a.save(ctx, &state)
 		if err != nil {
-			return enqueueResult{}, err
+			return startResult{}, err
 		}
-		return enqueueResult{UploadInProgress: true}, nil
+		return startResult{Busy: true}, nil
 	}
 
-	if len(state.Queue) >= a.runtime.MaxQueuedJobs {
-		err = a.save(ctx, &state)
-		if err != nil {
-			return enqueueResult{}, err
-		}
-		return enqueueResult{QueueFull: true}, nil
-	}
-
-	// The job ID is a v7, so the jobs of an image list in the order they were queued
-	jobID := uuid.NewV7().String()
-	req.JobID = jobID
-	state.Queue = append(state.Queue, queuedJob{JobID: jobID, SubjectHash: req.SubjectHash, Request: req, EnqueuedAt: time.Now()})
+	// The job ID is a v7, so the jobs of an image list in the order they started
+	req.JobID = uuid.NewV7().String()
 
 	// A job that can't be started isn't accepted, so the caller learns now rather than finding a job that never runs
-	err = a.startNext(ctx, &state)
+	err = a.activate(ctx, &state, req)
 	if err != nil {
-		state.Queue = removeQueued(state.Queue, jobID)
 		saveErr := a.save(ctx, &state)
-		return enqueueResult{}, errors.Join(err, saveErr)
+		return startResult{}, errors.Join(err, saveErr)
 	}
 
 	err = a.save(ctx, &state)
 	if err != nil {
-		return enqueueResult{}, err
+		return startResult{}, err
 	}
-
-	result := enqueueResult{JobID: jobID}
-	for i, job := range state.Queue {
-		if job.JobID == jobID {
-			result.Position = i + 1
-		}
-	}
-	return result, nil
+	return startResult{JobID: req.JobID}, nil
 }
 
-// Hold the image's ID for an upload that names it, unless another upload holds it or a job of the image is queued or running
+// Hold the image's ID for an upload that names it, unless another upload holds it or a job of the image is running
 //
 // The claim is what makes checking that the ID is unused and then storing the image safe: the actor answers one call at a time, so between the two no other upload can claim the same ID
-// A queued or running job means the image is already in use, and an upload writing its manifest now would race that job's own
+// A running job means the image is already in use, and an upload writing its manifest now would race that job's own
 func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, error) {
 	if req.Token == "" || req.TTL <= 0 {
 		return claimResult{}, errors.New("a claim needs a token and a positive TTL")
@@ -321,7 +278,7 @@ func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, 
 
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return claimResult{}, fmt.Errorf("failed to read the queue: %w", err)
+		return claimResult{}, fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
 	// An active job that ended without telling the actor would otherwise hold the ID forever
@@ -332,7 +289,7 @@ func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, 
 
 	now := time.Now()
 	heldByOther := state.Upload != nil && state.Upload.Token != req.Token && now.Before(state.Upload.ExpiresAt)
-	if heldByOther || state.Active != nil || len(state.Queue) > 0 {
+	if heldByOther || state.Active != nil {
 		return claimResult{Claimed: false}, a.save(ctx, &state)
 	}
 
@@ -344,12 +301,12 @@ func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, 
 	return claimResult{Claimed: true}, nil
 }
 
-// Give up the claim an upload holds, once its job is queued or the upload failed
+// Give up the claim an upload holds, once its job has started or the upload failed
 // A release from an upload that doesn't hold the claim, such as one whose claim expired, changes nothing
 func (a *imageActor) release(ctx context.Context, token string) error {
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to read the queue: %w", err)
+		return fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
 	if state.Upload == nil || state.Upload.Token != token {
@@ -359,12 +316,12 @@ func (a *imageActor) release(ctx context.Context, token string) error {
 	return a.save(ctx, &state)
 }
 
-// Record that a job finished, and start the next one
+// Record that a job finished, which frees the image for its next job
 // It returns when the job was recorded as finished, which is the same for every report about it, so a job can use it as a timestamp that doesn't change across its retries
 func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult, error) {
 	state, err := a.client.GetState(ctx)
 	if err != nil {
-		return finishedResult{}, fmt.Errorf("failed to read the queue: %w", err)
+		return finishedResult{}, fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
 	// A job reports at least once, so a report about a job that isn't active anymore is a repeat and changes nothing
@@ -378,12 +335,6 @@ func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult
 	}
 	finishedAt := a.finishActive(&state)
 
-	err = a.startNext(ctx, &state)
-	if err != nil {
-		// The alarm retries the start, so the job that finished is still recorded as finished
-		a.runtime.Log.WarnContext(ctx, "Failed to start the next job of an image", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.Any("error", err))
-	}
-
 	err = a.save(ctx, &state)
 	if err != nil {
 		return finishedResult{}, err
@@ -391,7 +342,7 @@ func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult
 	return finishedResult{FinishedAt: finishedAt}, nil
 }
 
-// Free the queue when the active job's workflow has ended, and start it when it never did
+// Free the image when the active job's workflow has ended, and start the workflow when it never did
 func (a *imageActor) heal(ctx context.Context, state *imageState) error {
 	if state.Active == nil {
 		return nil
@@ -423,7 +374,7 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) error {
 		return nil
 	}
 
-	a.runtime.Log.WarnContext(ctx, "Freed the queue of an image whose active job ended without reporting back",
+	a.runtime.Log.WarnContext(ctx, "Freed an image whose active job ended without reporting back",
 		slog.String("namespace", a.namespace),
 		slog.String("imageId", a.imageID),
 		slog.String("jobId", state.Active.JobID),
@@ -461,35 +412,25 @@ func (a *imageActor) finishActive(state *imageState) time.Time {
 	return finishedAt
 }
 
-// Start the job at the head of the queue when nothing is active
+// Record a job as active and start its workflow
 //
-// The job is recorded as active before its workflow is started, so a crash in between leaves an active job whose workflow doesn't exist, which heal frees, rather than a running workflow the actor doesn't know about, which nothing would stop the next job from racing
-func (a *imageActor) startNext(ctx context.Context, state *imageState) error {
-	if state.Active != nil || len(state.Queue) == 0 {
-		return nil
-	}
-
+// The job is recorded as active before its workflow is started, so a crash in between leaves an active job whose workflow doesn't exist, which heal starts or frees, rather than a running workflow the actor doesn't know about, which nothing would stop another job from racing
+func (a *imageActor) activate(ctx context.Context, state *imageState, req JobRequest) error {
 	// The check is scheduled before the job is recorded as active, so a process that stops between the two leaves an alarm behind to find the job
-	err := a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: time.Now().Add(retryStartAfter)})
+	err := a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: time.Now().Add(checkStartAfter)})
 	if err != nil {
-		return fmt.Errorf("failed to schedule the queue check: %w", err)
+		return fmt.Errorf("failed to schedule the image's check: %w", err)
 	}
 
-	next := state.Queue[0]
-	state.Queue = state.Queue[1:]
-	request := next.Request
-	state.Active = &activeJob{JobID: next.JobID, SubjectHash: next.SubjectHash, StartedAt: time.Now(), Request: &request, Retention: a.runtime.CompletedWorkflowRetention}
+	state.Active = &activeJob{JobID: req.JobID, SubjectHash: req.SubjectHash, StartedAt: time.Now(), Request: &req, Retention: a.runtime.CompletedWorkflowRetention}
 	err = a.client.SetState(ctx, *state, nil)
 	if err != nil {
-		state.Queue = append([]queuedJob{next}, state.Queue...)
 		state.Active = nil
 		return fmt.Errorf("failed to record the active job: %w", err)
 	}
 
-	err = a.jobs.start(ctx, next.Request)
+	err = a.jobs.start(ctx, req)
 	if err != nil {
-		// The job goes back to the head of the queue, so the order is kept when the start is retried
-		state.Queue = append([]queuedJob{next}, state.Queue...)
 		state.Active = nil
 		return fmt.Errorf("failed to start the job: %w", err)
 	}
@@ -509,33 +450,33 @@ func (a *imageActor) save(ctx context.Context, state *imageState) error {
 		state.Upload = nil
 	}
 
-	// An image with nothing queued and nothing to remember leaves nothing behind, so the actors of every image ever uploaded don't accumulate
-	if state.Active == nil && len(state.Queue) == 0 && len(state.History) == 0 && state.Upload == nil {
+	// An image with nothing running and nothing to remember leaves nothing behind, so the actors of every image ever uploaded don't accumulate
+	if state.Active == nil && len(state.History) == 0 && state.Upload == nil {
 		err := a.client.DeleteAlarm(ctx, alarmCheck)
 		if err != nil && !errors.Is(err, actor.ErrAlarmNotFound) {
 			return fmt.Errorf("failed to delete the alarm: %w", err)
 		}
 		err = a.client.DeleteState(ctx)
 		if err != nil && !errors.Is(err, actor.ErrStateNotFound) {
-			return fmt.Errorf("failed to delete the queue: %w", err)
+			return fmt.Errorf("failed to delete the image's state: %w", err)
 		}
 		return nil
 	}
 
 	err := a.client.SetState(ctx, *state, nil)
 	if err != nil {
-		return fmt.Errorf("failed to save the queue: %w", err)
+		return fmt.Errorf("failed to save the image's state: %w", err)
 	}
 
 	err = a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: a.nextCheck(state, now)})
 	if err != nil {
-		return fmt.Errorf("failed to schedule the queue check: %w", err)
+		return fmt.Errorf("failed to schedule the image's check: %w", err)
 	}
 
 	return nil
 }
 
-// Work out when the actor next needs to look at its queue
+// Work out when the actor next needs to look at its image
 func (a *imageActor) nextCheck(state *imageState, now time.Time) time.Time {
 	var due time.Time
 	consider := func(t time.Time) {
@@ -544,15 +485,11 @@ func (a *imageActor) nextCheck(state *imageState, now time.Time) time.Time {
 		}
 	}
 
-	switch {
-	case state.Active != nil:
+	if state.Active != nil {
 		// The workflow is failed by its own deadline, so past that it should have reported back
-		// Before then it's looked at every so often, so one that ended without its release reaching the actor doesn't hold up the queue until that deadline
+		// Before then it's looked at every so often, so one that ended without its release reaching the actor doesn't hold the image until that deadline
 		consider(state.Active.StartedAt.Add(jobDeadline(a.runtime.WorkflowTimeout) + activeCheckMargin))
 		consider(now.Add(activePollInterval))
-	case len(state.Queue) > 0:
-		// A queue with nothing active is a start that failed
-		consider(now.Add(retryStartAfter))
 	}
 	if len(state.History) > 0 && a.runtime.CompletedWorkflowRetention > 0 {
 		consider(state.History[0].FinishedAt.Add(a.runtime.CompletedWorkflowRetention))
@@ -583,14 +520,4 @@ func (a *imageActor) pruneHistory(state *imageState, now time.Time) {
 		}
 	}
 	state.History = keep
-}
-
-func removeQueued(queue []queuedJob, jobID string) []queuedJob {
-	out := queue[:0]
-	for _, job := range queue {
-		if job.JobID != jobID {
-			out = append(out, job)
-		}
-	}
-	return out
 }

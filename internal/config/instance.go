@@ -75,7 +75,6 @@ func GetDefaultConfig() *Config {
 			MaxSourcePixels:    50_000_000,
 			MaxVariants:        48,
 			MaxResolution:      8192,
-			MaxQueuedJobs:      10,
 			VipsCacheMaxMemory: 50 << 20, // 50MB
 		},
 		Dev: defaultDevConfig,

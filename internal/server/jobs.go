@@ -15,7 +15,7 @@ import (
 // RouteClientJobStatus is the handler for "GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}"
 //
 //	@Summary		Get the status of a job
-//	@Description	Returns the status of any job of an image. A queued job reports its place in the image's queue. The status of a finished job is retained for `actors.completedWorkflowRetention`.
+//	@Description	Returns the status of any job of an image. The status of a finished job is retained for `actors.completedWorkflowRetention`.
 //	@Tags			client
 //	@Produce		json
 //	@Security		Bearer
@@ -104,7 +104,6 @@ func (s *Server) respondJobStatus(w http.ResponseWriter, r *http.Request, ownJob
 		Namespace:   status.Namespace,
 		ImageID:     status.ImageID,
 		Status:      client.JobState(status.Status),
-		Position:    status.Position,
 		Total:       status.Total,
 		Completed:   status.Completed,
 		Error:       status.Error,

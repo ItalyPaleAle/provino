@@ -45,8 +45,6 @@ type OptimizeRequest struct {
 type JobState string
 
 const (
-	// JobQueued means the job is waiting for an earlier job of the same image to finish
-	JobQueued JobState = "queued"
 	// JobRunning means the job is generating variants
 	JobRunning JobState = "running"
 	// JobCompleted means the job finished and the image's manifest describes its result
@@ -55,17 +53,15 @@ const (
 	JobFailed JobState = "failed"
 )
 
-// JobAccepted is the answer to a request that queued a job
+// JobAccepted is the answer to a request that started a job
 type JobAccepted struct {
 	// Namespace and ID of the image the job works on
 	Namespace string `json:"namespace"`
 	ImageID   string `json:"imageId"`
 	// ID of the job, a UUIDv7
 	JobID string `json:"jobId"`
-	// Always `queued`: the job runs after the response is sent
+	// Always `running`: the job's workflow has started, and it does its work after the response is sent
 	Status JobState `json:"status"`
-	// 0 when the job started right away, its place in the image's queue otherwise
-	Position int `json:"position"`
 	// Key of the original in the originals store, set for uploads
 	SourceKey string `json:"sourceKey,omitempty"`
 	// Key of the image's manifest in the variants store
@@ -78,8 +74,6 @@ type JobStatus struct {
 	Namespace string   `json:"namespace"`
 	ImageID   string   `json:"imageId"`
 	Status    JobState `json:"status"`
-	// Place in the image's queue, set while the job is queued
-	Position int `json:"position,omitempty"`
 	// Number of variants the job generates, and how many are done
 	Total     int `json:"total"`
 	Completed int `json:"completed"`
@@ -92,7 +86,7 @@ type JobStatus struct {
 
 // Error is the body of every error response
 type Error struct {
-	// Machine-readable code, for example `queue_full`
+	// Machine-readable code, for example `image_busy`
 	Code string `json:"code"`
 	// Human-readable description
 	Message string `json:"message"`

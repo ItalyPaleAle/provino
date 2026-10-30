@@ -51,12 +51,12 @@ const (
 	testOrigin  = "https://app.example"
 )
 
-// fakeJobs records the jobs handlers queue and answers status lookups from a table
+// fakeJobs records the jobs handlers start and answers status lookups from a table
 type fakeJobs struct {
-	mu         sync.Mutex
-	enqueued   []actors.JobRequest
-	enqueueErr error
-	statuses   map[string]fakeJobStatus
+	mu       sync.Mutex
+	started  []actors.JobRequest
+	startErr error
+	statuses map[string]fakeJobStatus
 	// Claims on image IDs by image, holding the token of the upload that holds each
 	claims map[string]string
 	// Every claim that was requested, granted or not
@@ -112,15 +112,15 @@ type fakeJobStatus struct {
 	ownerHash string
 }
 
-func (f *fakeJobs) Enqueue(_ context.Context, req actors.JobRequest) (actors.EnqueueResult, error) {
+func (f *fakeJobs) Start(_ context.Context, req actors.JobRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.enqueueErr != nil {
-		return actors.EnqueueResult{}, f.enqueueErr
+	if f.startErr != nil {
+		return "", f.startErr
 	}
-	f.enqueued = append(f.enqueued, req)
-	return actors.EnqueueResult{JobID: uuid.NewV7().String(), Position: len(f.enqueued) - 1}, nil
+	f.started = append(f.started, req)
+	return uuid.NewV7().String(), nil
 }
 
 func (f *fakeJobs) Status(_ context.Context, namespace string, imageID string, jobID string) (actors.JobStatus, string, bool, error) {
@@ -136,8 +136,8 @@ func (f *fakeJobs) last(t *testing.T) actors.JobRequest {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	require.NotEmpty(t, f.enqueued, "no job was queued")
-	return f.enqueued[len(f.enqueued)-1]
+	require.NotEmpty(t, f.started, "no job was started")
+	return f.started[len(f.started)-1]
 }
 
 // fakeAuthorizer answers every upload with the same decision, and records what it was asked
@@ -507,7 +507,7 @@ func TestRunFailsWhenThePortIsTaken(t *testing.T) {
 	// Hold a port so the server can't listen on it
 	occupied, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer occupied.Close() //nolint:errcheck
+	defer occupied.Close()                      //nolint:errcheck
 	port := occupied.Addr().(*net.TCPAddr).Port //nolint:forcetypeassert
 
 	ts := newTestServer(t, testServerOptions{configure: func(c *config.Config) {
@@ -529,7 +529,7 @@ func TestRunFailsWhenThePortIsTaken(t *testing.T) {
 }
 
 func TestJWKSRoute(t *testing.T) {
-	keys, err := signing.LoadKeySet(config.ConfigSigningEd25519{ActiveKey: "k1", Keys: []config.ConfigSigningKey{{ID: "k1", PrivateKey: "whsk_" + strings.Repeat("A", 43) + "="}}})
+	keys, err := signing.LoadKeySet(config.ConfigSigningEd25519{Keys: []string{"whsk_" + strings.Repeat("A", 43) + "="}})
 	require.NoError(t, err)
 	ts := newTestServer(t, testServerOptions{signingKeys: keys})
 
@@ -539,13 +539,13 @@ func TestJWKSRoute(t *testing.T) {
 
 	set := decodeBody[webhook.JWKS](t, rec)
 	require.Len(t, set.Keys, 1)
-	assert.Equal(t, "k1", set.Keys[0].Kid)
+	assert.Equal(t, keys.ActiveKeyID(), set.Keys[0].Kid)
 	_, err = set.Ed25519Keys()
 	require.NoError(t, err)
 }
 
 func TestIngest(t *testing.T) {
-	t.Run("stores the image and queues its job as the authorizer decides", func(t *testing.T) {
+	t.Run("stores the image and starts its job as the authorizer decides", func(t *testing.T) {
 		ts := newTestServer(t, testServerOptions{})
 		ts.authz.decision.Notify = &webhook.Notify{Context: json.RawMessage(`{"from":"authorizer"}`)}
 
@@ -555,18 +555,16 @@ func TestIngest(t *testing.T) {
 
 		accepted := decodeBody[client.JobAccepted](t, rec)
 		assert.Equal(t, "default", accepted.Namespace)
-		assert.Equal(t, client.JobQueued, accepted.Status)
+		assert.Equal(t, client.JobRunning, accepted.Status)
 		imageID := uuid.MustParse(accepted.ImageID)
 		assert.Equal(t, ts.store.OriginalKey("default", imageID, "png"), accepted.SourceKey)
 		assert.Equal(t, ts.store.ManifestKey("default", imageID), accepted.ManifestKey)
 
-		// The authorizer was asked about this caller, with the context and what the browser said about the file
+		// The authorizer was asked about this caller, with the context the browser sent
 		require.Len(t, ts.authz.requests, 1)
 		asked := ts.authz.requests[0]
 		assert.Equal(t, "browser-1", asked.Subject)
 		assert.JSONEq(t, `{"site":"s1","profile":"hero"}`, string(asked.Context))
-		assert.Equal(t, "photo.png", asked.FileName)
-		assert.Equal(t, "image/jpeg", asked.ContentType)
 
 		// The job carries the decision, the original's measurements, and who started it
 		job := ts.jobs.last(t)
@@ -581,7 +579,7 @@ func TestIngest(t *testing.T) {
 		assert.Equal(t, "100x100.webp", job.Variants[0].Name)
 		assert.Equal(t, 5, job.Variants[0].Effort)
 		require.NotNil(t, job.Notify)
-		assert.Equal(t, "app", job.Notify.Endpoint, "the default endpoint is resolved when the job is queued")
+		assert.Equal(t, "app", job.Notify.Endpoint, "the default endpoint is resolved when the job is requested")
 		assert.Equal(t, subjectHash("browser-1"), job.SubjectHash)
 
 		// The original and the manifest that records it are stored, and the cache holds a copy for the job
@@ -669,9 +667,13 @@ func TestIngest(t *testing.T) {
 			image:  []byte{},
 			status: http.StatusBadRequest, code: "missing_image",
 		},
-		"a job that can't be queued": {
-			prepare: func(ts *testServer) { ts.jobs.enqueueErr = errors.New("actor host unavailable") },
+		"a job that can't be started": {
+			prepare: func(ts *testServer) { ts.jobs.startErr = errors.New("actor host unavailable") },
 			status:  http.StatusInternalServerError, code: "internal",
+		},
+		"an image with another job running": {
+			prepare: func(ts *testServer) { ts.jobs.startErr = actors.ErrImageBusy },
+			status:  http.StatusConflict, code: "image_busy",
 		},
 	}
 	for name, tt := range failures {
@@ -774,7 +776,7 @@ func TestCORSOnlyCoversThePublicRoutes(t *testing.T) {
 }
 
 func TestClientUpload(t *testing.T) {
-	t.Run("stores the image and queues its job", func(t *testing.T) {
+	t.Run("stores the image and starts its job", func(t *testing.T) {
 		ts := newTestServer(t, testServerOptions{})
 		imageID := uuid.NewV4()
 		metadata := client.UploadMetadata{
@@ -830,7 +832,7 @@ func TestClientUpload(t *testing.T) {
 		body, contentType := uploadBody(t, metadata, pngImage(t, 10, 10))
 		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-		// The claim is released once the job is queued
+		// The claim is released once the job has started
 		assert.False(t, ts.jobs.holdsClaim(imageID))
 
 		// The second upload is a JPEG, whose original would be stored under another key
@@ -843,7 +845,7 @@ func TestClientUpload(t *testing.T) {
 		rec = ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
 		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Equal(t, "image_exists", errorCode(t, rec))
-		assert.Len(t, ts.jobs.enqueued, 1)
+		assert.Len(t, ts.jobs.started, 1)
 		assert.False(t, ts.jobs.holdsClaim(imageID))
 
 		// Nothing of the second upload was stored
@@ -861,7 +863,7 @@ func TestClientUpload(t *testing.T) {
 		rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
 		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Equal(t, "image_exists", errorCode(t, rec))
-		assert.Empty(t, ts.jobs.enqueued)
+		assert.Empty(t, ts.jobs.started)
 
 		// The other upload's claim is left alone, and nothing was stored
 		assert.True(t, ts.jobs.holdsClaim(imageID))
@@ -872,7 +874,7 @@ func TestClientUpload(t *testing.T) {
 
 	t.Run("a failed upload releases its claim", func(t *testing.T) {
 		ts := newTestServer(t, testServerOptions{})
-		ts.jobs.enqueueErr = errors.New("queue unavailable")
+		ts.jobs.startErr = errors.New("actor host unavailable")
 		imageID := uuid.NewV4()
 
 		body, contentType := uploadBody(t, client.UploadMetadata{Namespace: "tenant-1", ImageID: imageID.String()}, pngImage(t, 10, 10))
@@ -912,7 +914,7 @@ func TestClientUpload(t *testing.T) {
 			rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", key, body, contentType))
 			assert.Equal(t, tt.status, rec.Code, rec.Body.String())
 			assert.Equal(t, tt.code, errorCode(t, rec))
-			assert.Empty(t, ts.jobs.enqueued)
+			assert.Empty(t, ts.jobs.started)
 		})
 	}
 }
@@ -925,8 +927,8 @@ func TestOptimize(t *testing.T) {
 		return ts.do(t, newRequest(t, http.MethodPost, "/v1/client/optimize", serverKey, bytes.NewReader(data), "application/json"))
 	}
 
-	// The request is queued without touching storage, so an image that doesn't exist is the job's problem, not this request's
-	t.Run("queues a job without touching storage", func(t *testing.T) {
+	// The job is started without touching storage, so an image that doesn't exist is the job's problem, not this request's
+	t.Run("starts a job without touching storage", func(t *testing.T) {
 		ts := newTestServer(t, testServerOptions{})
 		imageID := uuid.NewV7()
 		rec := optimize(t, ts, client.OptimizeRequest{
@@ -958,15 +960,10 @@ func TestOptimize(t *testing.T) {
 		"an unknown format":      {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), SourceFormat: "gif", Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}}, status: http.StatusBadRequest, code: "invalid_source_format"},
 		"conflicting variants":   {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "jpg", Quality: 80, Size: variant.Resolution{Width: 1}}, {Format: "jpg", Quality: 70, Size: variant.Resolution{Width: 1}}}}, status: http.StatusBadRequest, code: "invalid_variants"},
 		"a body that isn't JSON": {request: "not an object", status: http.StatusBadRequest, code: "invalid_body"},
-		"a full queue": {
+		"an image with another job running": {
 			request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}},
-			prepare: func(ts *testServer) { ts.jobs.enqueueErr = actors.ErrQueueFull },
-			status:  http.StatusTooManyRequests, code: "queue_full",
-		},
-		"an image still being uploaded": {
-			request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}},
-			prepare: func(ts *testServer) { ts.jobs.enqueueErr = actors.ErrUploadInProgress },
-			status:  http.StatusConflict, code: "upload_in_progress",
+			prepare: func(ts *testServer) { ts.jobs.startErr = actors.ErrImageBusy },
+			status:  http.StatusConflict, code: "image_busy",
 		},
 	}
 	for name, tt := range failures {
@@ -988,7 +985,7 @@ func TestJobStatusRoutes(t *testing.T) {
 	browserJob := uuid.NewV7().String()
 	backendJob := uuid.NewV7().String()
 	ts.jobs.statuses["default/"+imageID+"/"+browserJob] = fakeJobStatus{
-		status:    actors.JobStatus{JobID: browserJob, Namespace: "default", ImageID: imageID, Status: actors.StatusQueued, Position: 2},
+		status:    actors.JobStatus{JobID: browserJob, Namespace: "default", ImageID: imageID, Status: actors.StatusRunning, Total: 3, Completed: 1},
 		ownerHash: subjectHash("browser-1"),
 	}
 	ts.jobs.statuses["default/"+imageID+"/"+backendJob] = fakeJobStatus{
@@ -1007,12 +1004,12 @@ func TestJobStatusRoutes(t *testing.T) {
 	// The client API sees every job of an image, including those browsers started
 	rec = get("client", serverKey, browserJob)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 2, decodeBody[client.JobStatus](t, rec).Position)
+	assert.Equal(t, 1, decodeBody[client.JobStatus](t, rec).Completed)
 
 	// A browser sees its own job, and nothing else exists as far as it can tell
 	rec = get("public", browserKey, browserJob)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, client.JobQueued, decodeBody[client.JobStatus](t, rec).Status)
+	assert.Equal(t, client.JobRunning, decodeBody[client.JobStatus](t, rec).Status)
 	assert.Equal(t, http.StatusNotFound, get("public", browser2Key, browserJob).Code)
 	assert.Equal(t, http.StatusNotFound, get("public", browserKey, backendJob).Code)
 

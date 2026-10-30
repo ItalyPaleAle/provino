@@ -247,7 +247,7 @@ func TestValidateNotify(t *testing.T) {
 
 	t.Run("accepts every kind of outbound authentication", func(t *testing.T) {
 		cfg := validConfigForTest()
-		cfg.Signing.Ed25519 = ConfigSigningEd25519{ActiveKey: "k1", Keys: []ConfigSigningKey{{ID: "k1", PrivateKeyFile: "/etc/provino/k1.pem"}}}
+		cfg.Signing.Ed25519 = ConfigSigningEd25519{Keys: []string{"whsk_x"}}
 		cfg.Notify.Endpoints = map[string]ConfigNotifyEndpoint{
 			"hmac":    hmacEndpoint(),
 			"ed25519": {URL: "https://a.example.com", Auth: ConfigOutboundAuth{Type: OutboundAuthEd25519}},
@@ -315,26 +315,16 @@ func TestValidateNotify(t *testing.T) {
 }
 
 func TestValidateSigning(t *testing.T) {
-	tests := map[string]ConfigSigningEd25519{
-		"an active key without keys":           {ActiveKey: "k1"},
-		"keys without an active key":           {Keys: []ConfigSigningKey{{ID: "k1", PrivateKey: "whsk_x"}}},
-		"an active key that isn't listed":      {ActiveKey: "k2", Keys: []ConfigSigningKey{{ID: "k1", PrivateKey: "whsk_x"}}},
-		"an active key with only a public key": {ActiveKey: "k1", Keys: []ConfigSigningKey{{ID: "k1", PublicKey: "whpk_x"}}},
-		"a key with two sources":               {ActiveKey: "k1", Keys: []ConfigSigningKey{{ID: "k1", PrivateKey: "whsk_x", PrivateKeyFile: "/k1.pem"}}},
-		"two keys with one ID":                 {ActiveKey: "k1", Keys: []ConfigSigningKey{{ID: "k1", PrivateKey: "whsk_x"}, {ID: "k1", PublicKey: "whpk_x"}}},
-	}
-	for name, signing := range tests {
-		t.Run("rejects "+name, func(t *testing.T) {
-			cfg := validConfigForTest()
-			cfg.Signing.Ed25519 = signing
-			err := cfg.Validate(testLogger())
-			require.Error(t, err)
-		})
-	}
-
-	t.Run("accepts retired keys next to the active one", func(t *testing.T) {
+	t.Run("rejects an empty key", func(t *testing.T) {
 		cfg := validConfigForTest()
-		cfg.Signing.Ed25519 = ConfigSigningEd25519{ActiveKey: "new", Keys: []ConfigSigningKey{{ID: "new", PrivateKey: "whsk_x"}, {ID: "old", PublicKey: "whpk_x"}}}
+		cfg.Signing.Ed25519 = ConfigSigningEd25519{Keys: []string{"whsk_x", " "}}
+		err := cfg.Validate(testLogger())
+		require.ErrorContains(t, err, "entry 1 is empty")
+	})
+
+	t.Run("accepts keys that don't sign after the one that does", func(t *testing.T) {
+		cfg := validConfigForTest()
+		cfg.Signing.Ed25519 = ConfigSigningEd25519{Keys: []string{"whsk_x", "whsk_y"}}
 		err := cfg.Validate(testLogger())
 		require.NoError(t, err)
 	})
@@ -654,10 +644,6 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:    "no maximum number of source pixels",
 			updater: func(c *Config) { c.Images.MaxSourcePixels = 0 },
-		},
-		{
-			name:    "no maximum number of queued jobs",
-			updater: func(c *Config) { c.Images.MaxQueuedJobs = 0 },
 		},
 		{
 			name:    "no read timeout",

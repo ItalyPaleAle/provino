@@ -288,7 +288,7 @@ func TestImageActorNextCheck(t *testing.T) {
 	a := &imageActor{runtime: &Runtime{WorkflowTimeout: 10 * time.Minute, CompletedWorkflowRetention: 24 * time.Hour}}
 	now := time.Now()
 
-	// A running job is looked at every minute rather than only after its hour-long deadline, so a lost release doesn't hold the queue that long
+	// A running job is looked at every minute rather than only after its hour-long deadline, so a lost release doesn't hold the image that long
 	due := a.nextCheck(&imageState{Active: &activeJob{StartedAt: now}}, now)
 	assert.Equal(t, now.Add(activePollInterval), due)
 
@@ -456,8 +456,8 @@ func (h *testHost) upload(t *testing.T, imageID uuid.UUID, width int, height int
 	return source
 }
 
-// Queue a job and return its ID
-func (h *testHost) enqueue(t *testing.T, req JobRequest) string {
+// Start a job and return its ID
+func (h *testHost) startJob(t *testing.T, req JobRequest) string {
 	t.Helper()
 
 	if req.Namespace == "" {
@@ -466,9 +466,9 @@ func (h *testHost) enqueue(t *testing.T, req JobRequest) string {
 	if req.RequestedAt.IsZero() {
 		req.RequestedAt = time.Now()
 	}
-	res, err := h.Jobs().Enqueue(t.Context(), req)
+	jobID, err := h.Jobs().Start(t.Context(), req)
 	require.NoError(t, err)
-	return res.JobID
+	return jobID
 }
 
 // Wait for a job to reach a status, and return it
@@ -558,7 +558,7 @@ func TestJobGeneratesEveryVariant(t *testing.T) {
 		{Name: "200x200-cover.avif", Format: imaging.FormatAVIF, Quality: 40, Effort: 4, Resolution: imaging.Resolution{Width: 200, Height: 200}, Fit: imaging.FitCover},
 		{Name: "800xauto.jpg", Format: imaging.FormatJPEG, Quality: 85, Resolution: imaging.Resolution{Width: 800}, Fit: imaging.FitContain},
 	}
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: variants, Notify: &webhook.Notify{Endpoint: "test", Context: json.RawMessage(`{"site":"s1"}`)}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: variants, Notify: &webhook.Notify{Endpoint: "test", Context: json.RawMessage(`{"site":"s1"}`)}})
 
 	event := receiver.next(t)
 	assert.Equal(t, webhook.EventImageOptimized, event.Type)
@@ -611,7 +611,7 @@ func TestJobWithoutVariantsReportsTheStoredImage(t *testing.T) {
 	before, err := host.store.ReadManifestConsistent(t.Context(), testNamespace, imageID)
 	require.NoError(t, err)
 
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Notify: &webhook.Notify{Endpoint: "test"}})
 
 	event := receiver.next(t)
 	assert.Equal(t, webhook.EventImageStored, event.Type)
@@ -637,7 +637,7 @@ func TestJobCachesTheSourceImageLocally(t *testing.T) {
 	source := host.upload(t, imageID, 800, 600)
 	// Without a recorded size the job reads the header, which is what puts the source in the cache before the fan-out
 	source.Width, source.Height = 0, 0
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{
 		webpSpec("100x100.webp", 100, 100),
 		webpSpec("200x200.webp", 200, 200),
 		webpSpec("300x300.webp", 300, 300),
@@ -668,7 +668,7 @@ func TestJobFailureRestoresTheImage(t *testing.T) {
 	before, err := host.store.ReadManifestConsistent(t.Context(), testNamespace, imageID)
 	require.NoError(t, err)
 
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 
 	event := receiver.next(t)
 	assert.Equal(t, webhook.EventImageFailed, event.Type)
@@ -705,7 +705,7 @@ func TestJobFailureEventIsDatedWhenTheJobFailed(t *testing.T) {
 	imageID := uuid.NewV4()
 	requestedAt := time.Now().Add(-time.Hour)
 	start := time.Now()
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), SourceFormat: "jpg", RequestedAt: requestedAt, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), SourceFormat: "jpg", RequestedAt: requestedAt, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 	host.waitForJob(t, imageID, jobID, StatusFailed)
 
 	var received []time.Time
@@ -727,7 +727,7 @@ func TestJobForAMissingOriginalFails(t *testing.T) {
 	host := startTestHost(t, testHostOptions{webhookURL: receiver.URL})
 
 	imageID := uuid.NewV4()
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), SourceFormat: "jpg", Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), SourceFormat: "jpg", Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 
 	event := receiver.next(t)
 	assert.Equal(t, webhook.EventImageFailed, event.Type)
@@ -742,7 +742,7 @@ func TestJobForAMissingOriginalFails(t *testing.T) {
 
 	// An image without a manifest and a request without a format is the same: nothing to find the original by
 	otherID := uuid.NewV4()
-	otherJob := host.enqueue(t, JobRequest{ImageID: otherID.String(), Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	otherJob := host.startJob(t, JobRequest{ImageID: otherID.String(), Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
 	status = host.waitForJob(t, otherID, otherJob, StatusFailed)
 	assert.True(t, strings.HasPrefix(status.Error, ErrorImageNotFound), status.Error)
 }
@@ -757,7 +757,7 @@ func TestJobCompletesWhenTheWebhookIsNeverAcknowledged(t *testing.T) {
 
 	imageID := uuid.NewV4()
 	source := host.upload(t, imageID, 800, 600)
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 
 	// The variants and the manifest are there for the application to find, so the job completes and the undelivered event is only recorded
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
@@ -770,57 +770,48 @@ func TestJobCompletesWhenTheWebhookIsNeverAcknowledged(t *testing.T) {
 	assert.Equal(t, first, second)
 }
 
-// The jobs of one image run one at a time, in the order they were queued, so the last one's manifest is the one left behind
-func TestJobsOfOneImageRunInOrder(t *testing.T) {
+// The jobs of one image run one at a time, so a job sent while another is running is refused, and can be sent again once that one has finished
+func TestJobsOfOneImageRunOneAtATime(t *testing.T) {
 	release := make(chan struct{})
 	var held atomic.Bool
 	receiver := newTestReceiver(t, func(w http.ResponseWriter, event webhook.Event) {
-		// The first job's delivery is held, which holds the job, so the ones after it have to wait in the queue
+		// The first job's delivery is held, which holds the job, so the image stays busy
 		if held.CompareAndSwap(false, true) {
 			<-release
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	host := startTestHost(t, testHostOptions{webhookURL: receiver.URL, configure: func(c *config.Config) {
-		c.Images.MaxQueuedJobs = 2
-	}})
+	host := startTestHost(t, testHostOptions{webhookURL: receiver.URL})
 
 	imageID := uuid.NewV4()
 	source := host.upload(t, imageID, 800, 600)
-	notifyTest := &webhook.Notify{Endpoint: "test"}
-	first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: notifyTest})
+	first := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 	require.Eventually(t, held.Load, workflowWaitTimeout, 50*time.Millisecond, "the first job did not reach its delivery")
 
-	second, err := host.Jobs().Enqueue(t.Context(), JobRequest{Namespace: testNamespace, ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}})
-	require.NoError(t, err)
-	assert.Equal(t, 1, second.Position)
-	third, err := host.Jobs().Enqueue(t.Context(), JobRequest{Namespace: testNamespace, ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("300x300.webp", 300, 300)}})
-	require.NoError(t, err)
-	assert.Equal(t, 2, third.Position)
+	// The image is busy, so a second job is refused rather than kept for later
+	second := JobRequest{Namespace: testNamespace, ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}, RequestedAt: time.Now()}
+	_, err := host.Jobs().Start(t.Context(), second)
+	require.ErrorIs(t, err, ErrImageBusy)
 
-	// The queue holds two, so a third waiting job is refused
-	_, err = host.Jobs().Enqueue(t.Context(), JobRequest{Namespace: testNamespace, ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("400x400.webp", 400, 400)}})
-	require.ErrorIs(t, err, ErrQueueFull)
-
-	// A waiting job reports its place in the queue, and an image that isn't this one doesn't know the job at all
-	status, _, found, err := host.Jobs().Status(t.Context(), testNamespace, imageID.String(), third.JobID)
+	// The running job reports as running, and an image that isn't this one doesn't know the job at all
+	status, _, found, err := host.Jobs().Status(t.Context(), testNamespace, imageID.String(), first)
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, StatusQueued, status.Status)
-	assert.Equal(t, 2, status.Position)
-	_, _, found, err = host.Jobs().Status(t.Context(), testNamespace, uuid.NewV4().String(), third.JobID)
+	assert.Equal(t, StatusRunning, status.Status)
+	_, _, found, err = host.Jobs().Status(t.Context(), testNamespace, uuid.NewV4().String(), first)
 	require.NoError(t, err)
 	assert.False(t, found)
 
+	// Once the first job has finished, the second one is accepted
 	close(release)
 	host.waitForJob(t, imageID, first, StatusCompleted)
-	host.waitForJob(t, imageID, second.JobID, StatusCompleted)
-	host.waitForJob(t, imageID, third.JobID, StatusCompleted)
+	secondID := host.startJob(t, second)
+	host.waitForJob(t, imageID, secondID, StatusCompleted)
 
 	m := host.manifest(t, imageID)
-	assert.Equal(t, third.JobID, m.JobID)
+	assert.Equal(t, secondID, m.JobID)
 	require.Len(t, m.Variants, 1)
-	assert.Equal(t, "300x300.webp", m.Variants[0].Name)
+	assert.Equal(t, "200x200.webp", m.Variants[0].Name)
 }
 
 // A job's status says who started it, which is what lets a browser read its own jobs and nobody else's
@@ -829,7 +820,7 @@ func TestJobStatusCarriesTheSubject(t *testing.T) {
 
 	imageID := uuid.NewV4()
 	source := host.upload(t, imageID, 800, 600)
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, SubjectHash: "hash-of-the-subject"})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, SubjectHash: "hash-of-the-subject"})
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 
 	_, subjectHash, found, err := host.Jobs().Status(t.Context(), testNamespace, imageID.String(), jobID)
@@ -842,7 +833,7 @@ func TestJobStatusCarriesTheSubject(t *testing.T) {
 	assert.False(t, found)
 }
 
-// An active job whose workflow doesn't exist, which a crash between recording and starting it leaves behind, doesn't hold the queue
+// An active job whose workflow doesn't exist, which a crash between recording and starting it leaves behind, doesn't hold the image
 func TestImageActorFreesAStaleActiveJob(t *testing.T) {
 	host := startTestHost(t, testHostOptions{})
 
@@ -853,7 +844,7 @@ func TestImageActorFreesAStaleActiveJob(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 }
 
@@ -898,7 +889,7 @@ func TestImageActorFreesAJobWhoseJournalCouldBePurged(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}})
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 
 	// The stale job never ran, so it has no status and the manifest is the new job's
@@ -937,7 +928,7 @@ func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *tes
 
 	imageID := uuid.NewV4()
 	source := host.upload(t, imageID, 800, 600)
-	first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	first := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
 	host.waitForJob(t, imageID, first, StatusCompleted)
 	initial := host.manifest(t, imageID)
 	require.Len(t, initial.Variants, 1)
@@ -945,7 +936,7 @@ func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *tes
 	// An invalid quality proves the existing pair is never passed to the encoder while the new pair still needs the source
 	invalid := webpSpec("100x100.webp", 100, 100)
 	invalid.Quality = 101
-	second := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{invalid, webpSpec("200x200.webp", 200, 200)}})
+	second := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{invalid, webpSpec("200x200.webp", 200, 200)}})
 	host.waitForJob(t, imageID, second, StatusCompleted)
 
 	regenerated := host.manifest(t, imageID)
@@ -971,7 +962,7 @@ func TestJobNeverEnlargesSmallOriginals(t *testing.T) {
 		{Name: "1200x500-cover.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 1200, Height: 500}, Fit: imaging.FitCover},
 		{Name: "2400x1000-cover.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 2400, Height: 1000}, Fit: imaging.FitCover},
 	}
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: variants})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: variants})
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 
 	m := host.manifest(t, imageID)
@@ -1019,7 +1010,7 @@ func TestRegenerationReplacesEnlargedFiles(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("1000x1000.webp", 1000, 1000), webpSpec("2000x2000.webp", 2000, 2000)}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("1000x1000.webp", 1000, 1000), webpSpec("2000x2000.webp", 2000, 2000)}})
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 
 	m := host.manifest(t, imageID)
@@ -1044,7 +1035,7 @@ func TestVariantsThatComeOutAsOneFile(t *testing.T) {
 		source := host.upload(t, imageID, 1500, 1000)
 
 		// For a 3:2 source, a 600x600 box and a box 600 pixels wide both come out at 600x400
-		jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{
+		jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{
 			withQuality(webpSpec("600x600.webp", 600, 600), 90),
 			withQuality(webpSpec("600xauto.webp", 600, 0), 20),
 		}})
@@ -1061,13 +1052,13 @@ func TestVariantsThatComeOutAsOneFile(t *testing.T) {
 	t.Run("a file another variant reuses is never replaced with different settings", func(t *testing.T) {
 		imageID := uuid.NewV4()
 		source := host.upload(t, imageID, 1500, 1000)
-		first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
+		first := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
 		host.waitForJob(t, imageID, first, StatusCompleted)
 		stored, err := host.store.ReadVariant(t.Context(), testNamespace, imageID, 600, 400, "webp")
 		require.NoError(t, err)
 
 		// The first variant reuses the stored file, so the second one can't be stored over it at another quality
-		second := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
+		second := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
 			withQuality(webpSpec("600x600.webp", 600, 600), 90),
 			withQuality(webpSpec("600xauto.webp", 600, 0), 20),
 		}})
@@ -1085,11 +1076,11 @@ func TestVariantsThatComeOutAsOneFile(t *testing.T) {
 	t.Run("the same settings share the file", func(t *testing.T) {
 		imageID := uuid.NewV4()
 		source := host.upload(t, imageID, 1500, 1000)
-		first := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
+		first := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{withQuality(webpSpec("600x600.webp", 600, 600), 90)}})
 		host.waitForJob(t, imageID, first, StatusCompleted)
 		initial := host.manifest(t, imageID)
 
-		second := host.enqueue(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
+		second := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{
 			withQuality(webpSpec("600x600.webp", 600, 600), 90),
 			withQuality(webpSpec("600xauto.webp", 600, 0), 90),
 		}})
@@ -1148,7 +1139,7 @@ func TestImageIDClaims(t *testing.T) {
 	})
 }
 
-// A job that is running or waiting means the image is in use, so an upload naming it is refused
+// A running job means the image is in use, so an upload naming it is refused
 func TestImageIDClaimsWaitForTheImageJobs(t *testing.T) {
 	// The webhook holds the job open until the claim has been tried, so the job is still running when it arrives
 	unblock := make(chan struct{})
@@ -1160,7 +1151,7 @@ func TestImageIDClaimsWaitForTheImageJobs(t *testing.T) {
 
 	imageID := uuid.NewV4()
 	source := host.upload(t, imageID, 400, 300)
-	jobID := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
+	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}, Notify: &webhook.Notify{Endpoint: "test"}})
 
 	// Wait for the delivery, which the job makes after its manifest step
 	select {
@@ -1177,7 +1168,7 @@ func TestImageIDClaimsWaitForTheImageJobs(t *testing.T) {
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 }
 
-// An image an upload is still storing has no original yet, so a job that isn't the upload's own waits until the upload has queued it
+// An image an upload is still storing has no original yet, so the only job that may start is the upload's own, and any other is refused until the upload is done
 func TestJobsWaitForAnUploadInProgress(t *testing.T) {
 	host := startTestHost(t, testHostOptions{})
 	jobs := host.Jobs()
@@ -1189,17 +1180,19 @@ func TestJobsWaitForAnUploadInProgress(t *testing.T) {
 
 	// The original isn't stored yet, so an optimize job would only fail with image_not_found
 	optimize := JobRequest{Namespace: testNamespace, ImageID: imageID.String(), SourceFormat: "png", Variants: []VariantSpec{webpSpec("200x200.webp", 200, 200)}, RequestedAt: time.Now()}
-	_, err = jobs.Enqueue(t.Context(), optimize)
-	require.ErrorIs(t, err, ErrUploadInProgress)
+	_, err = jobs.Start(t.Context(), optimize)
+	require.ErrorIs(t, err, ErrImageBusy)
 
-	// The upload's own job is accepted while it holds the claim, and a job sent after it waits behind it
+	// The upload's own job starts while it holds the claim, and any other job is still refused until the upload has released it and its job has finished
 	source := host.upload(t, imageID, 400, 300)
-	uploadJob := host.enqueue(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
-	optimizeJob := host.enqueue(t, optimize)
+	uploadJob := host.startJob(t, JobRequest{ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec("100x100.webp", 100, 100)}})
+	_, err = jobs.Start(t.Context(), optimize)
+	require.ErrorIs(t, err, ErrImageBusy)
 
 	err = jobs.ReleaseUpload(t.Context(), testNamespace, imageID.String(), "upload")
 	require.NoError(t, err)
 	host.waitForJob(t, imageID, uploadJob, StatusCompleted)
+	optimizeJob := host.startJob(t, optimize)
 	host.waitForJob(t, imageID, optimizeJob, StatusCompleted)
 
 	// A claim that expired no longer holds anything back
@@ -1209,7 +1202,7 @@ func TestJobsWaitForAnUploadInProgress(t *testing.T) {
 	require.True(t, claimed)
 	time.Sleep(100 * time.Millisecond)
 	optimize.ImageID = otherID.String()
-	_, err = jobs.Enqueue(t.Context(), optimize)
+	_, err = jobs.Start(t.Context(), optimize)
 	require.NoError(t, err)
 }
 

@@ -104,13 +104,13 @@ func (e *APIError) Error() string {
 	return msg
 }
 
-// IsCode reports whether err is an APIError with the given code, for example `queue_full`
+// IsCode reports whether err is an APIError with the given code, for example `image_busy`
 func IsCode(err error, code string) bool {
 	apiErr, ok := errors.AsType[*APIError](err)
 	return ok && apiErr.Body.Code == code
 }
 
-// Upload stores an image and queues the job that generates its variants
+// Upload stores an image and starts the job that generates its variants
 // The image is streamed and its format is detected by provino from its content
 func (c *Client) Upload(ctx context.Context, metadata UploadMetadata, filename string, image io.Reader) (JobAccepted, error) {
 	encoded, err := json.Marshal(metadata)
@@ -165,7 +165,8 @@ func writeUpload(mw *multipart.Writer, metadata []byte, filename string, image i
 	return nil
 }
 
-// Optimize queues a job that generates variants for an image that's already stored
+// Optimize starts a job that generates variants for an image that's already stored
+// It fails with the code `image_busy` while another job of the image is running, and can be called again once that job has finished
 func (c *Client) Optimize(ctx context.Context, req OptimizeRequest) (JobAccepted, error) {
 	encoded, err := json.Marshal(req)
 	if err != nil {

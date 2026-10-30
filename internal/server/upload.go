@@ -65,7 +65,7 @@ func (s *Server) claimImageID(ctx context.Context, in *upload) error {
 		return nil
 	}
 
-	// The claim outlives the slowest upload the server lets a client send, and the release after the job is queued is what normally ends it
+	// The claim outlives the slowest upload the server lets a client send, and the release after the job has started is what normally ends it
 	token := uuid.NewV4().String()
 	ttl := config.Get().Server.ReadTimeout + claimTTLMargin
 	claimed, err := s.jobs.ClaimUpload(ctx, in.namespace, in.imageID.String(), token, ttl)
@@ -93,7 +93,7 @@ func (s *Server) claimImageID(ctx context.Context, in *upload) error {
 	return nil
 }
 
-// Give up the claim on an image ID, once the upload's job is queued or the upload failed
+// Give up the claim on an image ID, once the upload's job has started or the upload failed
 // The claim expires on its own, so a release that fails is only logged
 func (s *Server) releaseImageID(ctx context.Context, in upload) {
 	if in.claimToken == "" {
@@ -280,9 +280,9 @@ func (s *Server) measureUpload(ctx context.Context, tmp *os.File) (actors.JobSou
 	return actors.JobSource{Width: size.Width, Height: size.Height}, nil
 }
 
-// Queue the job of an upload, removing everything the upload wrote when it can't be queued
-func (s *Server) enqueueUpload(ctx context.Context, in upload, source actors.JobSource) (client.JobAccepted, error) {
-	res, err := s.jobs.Enqueue(ctx, actors.JobRequest{
+// Start the job of an upload, removing everything the upload wrote when it can't be started
+func (s *Server) startUpload(ctx context.Context, in upload, source actors.JobSource) (client.JobAccepted, error) {
+	jobID, err := s.jobs.Start(ctx, actors.JobRequest{
 		Namespace:   in.namespace,
 		ImageID:     in.imageID.String(),
 		Source:      &source,
@@ -293,18 +293,17 @@ func (s *Server) enqueueUpload(ctx context.Context, in upload, source actors.Job
 	})
 	if err != nil {
 		s.removeUpload(ctx, in, source.Format)
-		if errors.Is(err, actors.ErrQueueFull) {
-			return client.JobAccepted{}, errQueueFull
+		if errors.Is(err, actors.ErrImageBusy) {
+			return client.JobAccepted{}, errImageBusy
 		}
-		return client.JobAccepted{}, fmt.Errorf("failed to queue the job: %w", err)
+		return client.JobAccepted{}, fmt.Errorf("failed to start the job: %w", err)
 	}
 
 	return client.JobAccepted{
 		Namespace:   in.namespace,
 		ImageID:     in.imageID.String(),
-		JobID:       res.JobID,
-		Status:      client.JobQueued,
-		Position:    res.Position,
+		JobID:       jobID,
+		Status:      client.JobRunning,
 		SourceKey:   s.store.OriginalKey(in.namespace, in.imageID, source.Format),
 		ManifestKey: s.store.ManifestKey(in.namespace, in.imageID),
 	}, nil

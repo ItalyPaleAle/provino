@@ -20,15 +20,6 @@ type AuthorizeRequest struct {
 	Subject string `json:"subject"`
 	// The opaque context the browser sent in the upload's metadata part, forwarded verbatim
 	Context json.RawMessage `json:"context,omitempty"`
-	// The file being uploaded, as the browser described it
-	File AuthorizeFile `json:"file"`
-}
-
-// AuthorizeFile is what the browser said about the file it is uploading
-// Neither value is trusted: provino detects the format from the file's content
-type AuthorizeFile struct {
-	Name        string `json:"name,omitempty"`
-	ContentType string `json:"contentType,omitempty"`
 }
 
 // AuthorizeResponse is the authorizer's decision about an upload it allows
