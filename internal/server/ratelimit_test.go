@@ -32,8 +32,7 @@ func (s *stubRateLimiter) Allow(_ context.Context, key string) (bool, time.Durat
 func TestMiddlewareRateLimit(t *testing.T) {
 	t.Run("refuses a request that didn't go through authentication", func(t *testing.T) {
 		limiter := &stubRateLimiter{allowed: true}
-		s := &Server{rateLimiter: limiter}
-		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handler := middlewareRateLimit(limiter)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("a request without a caller reached the handler")
 		}))
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/public/ingest", nil)
@@ -48,8 +47,7 @@ func TestMiddlewareRateLimit(t *testing.T) {
 	// The budget belongs to the caller, so two callers behind one address don't share it, and the key never repeats the subject itself
 	t.Run("keys the budget on the caller's subject", func(t *testing.T) {
 		limiter := &stubRateLimiter{allowed: true}
-		s := &Server{rateLimiter: limiter}
-		handler := s.middlewareRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := middlewareRateLimit(limiter)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		}))
 
@@ -68,8 +66,7 @@ func TestMiddlewareRateLimit(t *testing.T) {
 
 	t.Run("rejects the request with retry-after", func(t *testing.T) {
 		limiter := &stubRateLimiter{retryAfter: 1500 * time.Millisecond}
-		s := &Server{rateLimiter: limiter}
-		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handler := middlewareRateLimit(limiter)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("rate-limited request reached the handler")
 		}))
 		req := httptest.NewRequestWithContext(auth.WithPrincipal(t.Context(), auth.Principal{Subject: "user-1"}), http.MethodPost, "/v1/public/ingest", nil)
@@ -84,8 +81,7 @@ func TestMiddlewareRateLimit(t *testing.T) {
 
 	t.Run("fails closed when Francis is unavailable", func(t *testing.T) {
 		limiter := &stubRateLimiter{err: errors.New("actor host unavailable")}
-		s := &Server{rateLimiter: limiter}
-		handler := s.middlewareRateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handler := middlewareRateLimit(limiter)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("request reached the handler after a rate-limit error")
 		}))
 		req := httptest.NewRequestWithContext(auth.WithPrincipal(t.Context(), auth.Principal{Subject: "user-1"}), http.MethodPost, "/v1/public/ingest", nil)

@@ -42,8 +42,9 @@ server:
   ## server.writeTimeout (duration)
   ## Description:
   ##   Maximum time to write a response, measured from the end of reading the request headers
-  ## Default: "5m"
-  #writeTimeout: "5m"
+  ##   The time an upload's body takes to arrive counts against it too, so it has to be longer than `readTimeout`, with room left to store the image and start its job
+  ## Default: "6m"
+  #writeTimeout: "6m"
 
   ## server.tls
   ## Description:
@@ -126,7 +127,7 @@ auth:
     ## auth.scopes.server (string)
     ## Description:
     ##   Scope required to use the client API under `/v1/client`, which is trusted with every namespace
-    ##   Set it to an empty string to accept any authenticated caller
+    ##   Set it to an empty string to accept any authenticated caller, which logs a warning at startup
     ## Default: "server"
     #server: "server"
 
@@ -392,6 +393,30 @@ rateLimit:
   ##   It's what lets a user drop a whole folder of photos in at once, while `rate` bounds a steady stream
   ## Default: 30
   #burst: 30
+
+  ## rateLimit.status
+  ## Description:
+  ##   Per-caller limit on job status lookups, through both `/v1/public/images/…/jobs/…` and `/v1/client/images/…/jobs/…`
+  ##   It has a budget of its own, so polling the jobs of a batch of uploads never uses up the budget of the uploads themselves
+  status:
+    ## rateLimit.status.rate (number)
+    ## Description:
+    ##   Number of lookups admitted per caller during each `per` interval
+    ## Default: 600
+    #rate: 600
+
+    ## rateLimit.status.per (duration)
+    ## Description:
+    ##   Interval over which `rate` lookups are admitted
+    ## Default: "1m"
+    #per: "1m"
+
+    ## rateLimit.status.burst (number)
+    ## Description:
+    ##   Maximum number of lookups from one caller that can be admitted at once before throttling starts
+    ##   It's what lets a browser poll every job of a folder of photos it just uploaded, while `rate` bounds a steady stream
+    ## Default: 300
+    #burst: 300
 
 actors:
   ## actors.runtime (string)

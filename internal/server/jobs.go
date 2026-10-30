@@ -15,7 +15,7 @@ import (
 // RouteClientJobStatus is the handler for "GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}"
 //
 //	@Summary		Get the status of a job
-//	@Description	Returns the status of any job of an image. The status of a finished job is retained for `actors.completedWorkflowRetention`.
+//	@Description	Returns the status of any job of an image. The status of a finished job is retained for `actors.completedWorkflowRetention`. Lookups are rate-limited per caller, by `rateLimit.status`, and a throttled one is answered with `429 rate_limited` and a `Retry-After` header.
 //	@Tags			client
 //	@Produce		json
 //	@Security		Bearer
@@ -27,6 +27,7 @@ import (
 //	@Failure		401			{object}	client.Error
 //	@Failure		403			{object}	client.Error
 //	@Failure		404			{object}	client.Error
+//	@Failure		429			{object}	client.Error
 //	@Router			/v1/client/images/{namespace}/{imageId}/jobs/{jobId} [get]
 func (s *Server) RouteClientJobStatus(w http.ResponseWriter, r *http.Request) {
 	s.appMetrics.RecordAPICall(r.Context(), "client-job-status")
@@ -36,7 +37,7 @@ func (s *Server) RouteClientJobStatus(w http.ResponseWriter, r *http.Request) {
 // RoutePublicJobStatus is the handler for "GET /v1/public/images/{namespace}/{imageId}/jobs/{jobId}"
 //
 //	@Summary		Get the status of one's own job
-//	@Description	Returns the status of a job the caller started with a browser upload. A job started by anyone else, or through the client API, is reported as not found.
+//	@Description	Returns the status of a job the caller started with a browser upload. A job started by anyone else, or through the client API, is reported as not found. Lookups are rate-limited per caller, by `rateLimit.status`, and a throttled one is answered with `429 rate_limited` and a `Retry-After` header.
 //	@Tags			public
 //	@Produce		json
 //	@Security		Bearer
@@ -48,6 +49,7 @@ func (s *Server) RouteClientJobStatus(w http.ResponseWriter, r *http.Request) {
 //	@Failure		401			{object}	client.Error
 //	@Failure		403			{object}	client.Error
 //	@Failure		404			{object}	client.Error
+//	@Failure		429			{object}	client.Error
 //	@Router			/v1/public/images/{namespace}/{imageId}/jobs/{jobId} [get]
 func (s *Server) RoutePublicJobStatus(w http.ResponseWriter, r *http.Request) {
 	s.appMetrics.RecordAPICall(r.Context(), "public-job-status")

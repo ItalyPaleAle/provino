@@ -42,7 +42,8 @@ type Options struct {
 }
 
 // Startup initializes libvips
-// It must be called once before any variant is generated, and libvips cannot be restarted after Shutdown, so repeated calls are ignored
+// It must be called once before any variant is generated, and repeated calls are ignored
+// libvips is never shut down: the process releases what it holds when it exits, and a shutdown could pull it from under an encode that's still running
 func Startup(ctx context.Context, opts Options) error {
 	var err error
 	startupOnce.Do(func() {
@@ -65,12 +66,6 @@ func Startup(ctx context.Context, opts Options) error {
 	}
 
 	return nil
-}
-
-// Shutdown releases the resources held by libvips
-// It cannot be started again afterwards, so this is only meant to be called while the process is terminating
-func Shutdown() {
-	vips.Shutdown()
 }
 
 // Encoder generates variants with libvips

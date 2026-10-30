@@ -254,6 +254,7 @@ func (a *imageActor) startJob(ctx context.Context, req JobRequest) (startResult,
 	req.JobID = uuid.NewV7().String()
 
 	// A job that can't be started isn't accepted, so the caller learns now rather than finding a job that never runs
+	// The state is saved even then, because a start that failed may still leave the job active until heal confirms its workflow doesn't exist
 	err = a.activate(ctx, &state, req)
 	if err != nil {
 		saveErr := a.save(ctx, &state)
@@ -429,14 +430,14 @@ func (a *imageActor) activate(ctx context.Context, state *imageState, req JobReq
 		return fmt.Errorf("failed to record the active job: %w", err)
 	}
 
+	// The request is dropped whatever the outcome: a workflow that started no longer needs it, and a job whose start failed is never started again, since its caller is told it wasn't accepted
+	// A failed start still leaves the job active, because Francis may have recorded the start before the failure, such as when its answer timed out
+	// The next heal then keeps the image busy if the workflow exists and frees it otherwise, so a workflow that did start never runs alongside another job of the image
 	err = a.jobs.start(ctx, req)
+	state.Active.Request = nil
 	if err != nil {
-		state.Active = nil
 		return fmt.Errorf("failed to start the job: %w", err)
 	}
-
-	// The workflow exists now, so its request no longer needs to be kept
-	state.Active.Request = nil
 	return nil
 }
 

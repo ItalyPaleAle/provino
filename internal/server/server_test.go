@@ -61,6 +61,8 @@ type fakeJobs struct {
 	claims map[string]string
 	// Every claim that was requested, granted or not
 	claimed int
+	// Every status lookup that reached the jobs
+	statusCalls int
 }
 
 func (f *fakeJobs) ClaimUpload(_ context.Context, namespace string, imageID string, token string, ttl time.Duration) (bool, error) {
@@ -127,6 +129,7 @@ func (f *fakeJobs) Status(_ context.Context, namespace string, imageID string, j
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.statusCalls++
 	s, ok := f.statuses[namespace+"/"+imageID+"/"+jobID]
 	return s.status, s.ownerHash, ok, nil
 }
@@ -164,6 +167,8 @@ type testServer struct {
 	store   *store.Store
 	cache   *sourcecache.Cache
 	limiter *stubRateLimiter
+	// Limiter of the job status lookups, which has a budget of its own
+	statusLimiter *stubRateLimiter
 }
 
 type testServerOptions struct {
@@ -220,22 +225,24 @@ func newTestServer(t *testing.T, opts testServerOptions) *testServer {
 			AllowedFormats: config.SourceFormats,
 			Variants:       []variant.Spec{{Format: variant.FormatWebP, Quality: 80, Effort: new(5), Size: variant.Resolution{Width: 100, Height: 100}, Fit: variant.FitContain}},
 		}},
-		store:   imageStore,
-		cache:   cache,
-		limiter: &stubRateLimiter{allowed: true},
+		store:         imageStore,
+		cache:         cache,
+		limiter:       &stubRateLimiter{allowed: true},
+		statusLimiter: &stubRateLimiter{allowed: true},
 	}
 
 	serverOpts := NewServerOpts{
-		Jobs:          ts.jobs,
-		RateLimiter:   ts.limiter,
-		Store:         imageStore,
-		SourceCache:   cache,
-		Measurer:      imaging.NewEncoder(),
-		Authenticator: authenticators,
-		Notifier:      notifier,
-		SigningKeys:   opts.signingKeys,
-		Ready:         opts.ready,
-		TraceProvider: opts.traceProvider,
+		Jobs:              ts.jobs,
+		IngestRateLimiter: ts.limiter,
+		StatusRateLimiter: ts.statusLimiter,
+		Store:             imageStore,
+		SourceCache:       cache,
+		Measurer:          imaging.NewEncoder(),
+		Authenticator:     authenticators,
+		Notifier:          notifier,
+		SigningKeys:       opts.signingKeys,
+		Ready:             opts.ready,
+		TraceProvider:     opts.traceProvider,
 	}
 	if !opts.noAuthorizer {
 		serverOpts.Authorizer = ts.authz
@@ -284,6 +291,12 @@ func pngImage(t *testing.T, width int, height int) []byte {
 // Build a multipart upload, with the metadata part first unless it's nil
 func uploadBody(t *testing.T, metadata any, image []byte) (*bytes.Buffer, string) {
 	t.Helper()
+	return uploadBodyWithDisposition(t, metadata, image, `form-data; name="image"; filename="photo.png"`)
+}
+
+// Build a multipart upload whose image part has the given Content-Disposition
+func uploadBodyWithDisposition(t *testing.T, metadata any, image []byte, disposition string) (*bytes.Buffer, string) {
+	t.Helper()
 
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
@@ -295,7 +308,7 @@ func uploadBody(t *testing.T, metadata any, image []byte) (*bytes.Buffer, string
 	}
 	if image != nil {
 		header := textproto.MIMEHeader{}
-		header.Set("Content-Disposition", `form-data; name="image"; filename="photo.png"`)
+		header.Set("Content-Disposition", disposition)
 		header.Set("Content-Type", "image/jpeg")
 		part, err := mw.CreatePart(header)
 		require.NoError(t, err)
@@ -572,7 +585,6 @@ func TestIngest(t *testing.T) {
 		assert.Equal(t, accepted.ImageID, job.ImageID)
 		require.NotNil(t, job.Source)
 		assert.Equal(t, "png", job.Source.Format)
-		assert.Equal(t, "photo.png", job.Source.Name)
 		assert.Equal(t, 400, job.Source.Width)
 		assert.Equal(t, 300, job.Source.Height)
 		require.Len(t, job.Variants, 1)
@@ -813,6 +825,22 @@ func TestClientUpload(t *testing.T) {
 		assert.Equal(t, imageID.String(), decodeBody[client.JobAccepted](t, rec).ImageID)
 	})
 
+	// The original is stored under the image's ID, so the part's file name is never read: it can be missing, or longer than a job's input can hold
+	t.Run("ignores the image's file name", func(t *testing.T) {
+		dispositions := map[string]string{
+			"no file name":   `form-data; name="image"`,
+			"long file name": `form-data; name="image"; filename="` + strings.Repeat("a", 100<<10) + `.png"`,
+		}
+		for name, disposition := range dispositions {
+			t.Run(name, func(t *testing.T) {
+				ts := newTestServer(t, testServerOptions{})
+				body, contentType := uploadBodyWithDisposition(t, client.UploadMetadata{Namespace: "tenant-1"}, pngImage(t, 10, 10), disposition)
+				rec := ts.do(t, newRequest(t, http.MethodPost, "/v1/client/upload", serverKey, body, contentType))
+				require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			})
+		}
+	})
+
 	t.Run("an upload without variants is still a job", func(t *testing.T) {
 		ts := newTestServer(t, testServerOptions{})
 		body, contentType := uploadBody(t, client.UploadMetadata{Namespace: "tenant-1"}, pngImage(t, 10, 10))
@@ -1017,4 +1045,23 @@ func TestJobStatusRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, get("client", serverKey, uuid.NewV4().String()).Code)
 	assert.Equal(t, http.StatusForbidden, get("client", browserKey, backendJob).Code)
 	assert.Equal(t, http.StatusUnauthorized, get("public", "", browserJob).Code)
+
+	// Every lookup reaches the actors, so both routes are held to the status budget, keyed on the caller, and a throttled lookup never reaches them
+	t.Run("are rate limited per caller", func(t *testing.T) {
+		ts := newTestServer(t, testServerOptions{})
+		ts.statusLimiter.allowed = false
+		ts.statusLimiter.retryAfter = time.Second
+
+		for _, route := range []struct{ scope, key string }{{"public", browserKey}, {"client", serverKey}} {
+			rec := ts.do(t, newRequest(t, http.MethodGet, "/v1/"+route.scope+"/images/default/"+imageID+"/jobs/"+browserJob, route.key, nil, ""))
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code, route.scope)
+			assert.Equal(t, "1", rec.Header().Get("Retry-After"), route.scope)
+		}
+		require.Len(t, ts.statusLimiter.keys, 2)
+		assert.NotEqual(t, ts.statusLimiter.keys[0], ts.statusLimiter.keys[1])
+		assert.Zero(t, ts.jobs.statusCalls, "a throttled lookup never reaches the actors")
+
+		// Uploads have a budget of their own, which polling doesn't spend
+		assert.Empty(t, ts.limiter.keys)
+	})
 }

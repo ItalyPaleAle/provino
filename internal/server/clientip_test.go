@@ -88,6 +88,22 @@ func TestMiddlewareClientIP(t *testing.T) {
 			headers:    map[string][]string{headerXRealIP: {"203.0.113.5"}},
 			want:       "203.0.113.5",
 		},
+		// A proxy that maintains a list of hops passes X-Real-IP through as the client sent it, so it never stands in for the part of the list that can't be trusted
+		"X-Real-IP next to a list that ends in a malformed entry": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerXForwardedFor: {"203.0.113.5, not-an-ip"}, headerXRealIP: {"192.0.2.99"}},
+			want:       "10.1.2.3:5555",
+		},
+		"X-Real-IP next to an obfuscated Forwarded hop": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerForwarded: {"for=_hidden"}, headerXRealIP: {"192.0.2.99"}},
+			want:       "10.1.2.3:5555",
+		},
+		"X-Real-IP next to a list of trusted proxies": {
+			remoteAddr: "10.1.2.3:5555",
+			headers:    map[string][]string{headerXForwardedFor: {"10.7.7.7, 10.9.9.9"}, headerXRealIP: {"192.0.2.99"}},
+			want:       "10.7.7.7",
+		},
 		"an IPv6 client": {
 			remoteAddr: "[2001:db8::1]:5555",
 			headers:    map[string][]string{headerXForwardedFor: {"2001:db8::42"}},

@@ -112,7 +112,7 @@ func IsCode(err error, code string) bool {
 
 // Upload stores an image and starts the job that generates its variants
 // The image is streamed and its format is detected by provino from its content
-func (c *Client) Upload(ctx context.Context, metadata UploadMetadata, filename string, image io.Reader) (JobAccepted, error) {
+func (c *Client) Upload(ctx context.Context, metadata UploadMetadata, image io.Reader) (JobAccepted, error) {
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
 		return JobAccepted{}, fmt.Errorf("failed to encode the metadata: %w", err)
@@ -122,7 +122,7 @@ func (c *Client) Upload(ctx context.Context, metadata UploadMetadata, filename s
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 	go func() {
-		err := writeUpload(mw, encoded, filename, image)
+		err := writeUpload(mw, encoded, image)
 		_ = pw.CloseWithError(err)
 	}()
 
@@ -137,14 +137,15 @@ func (c *Client) Upload(ctx context.Context, metadata UploadMetadata, filename s
 }
 
 // Write the multipart body of an upload
-func writeUpload(mw *multipart.Writer, metadata []byte, filename string, image io.Reader) error {
+func writeUpload(mw *multipart.Writer, metadata []byte, image io.Reader) error {
 	err := mw.WriteField("metadata", string(metadata))
 	if err != nil {
 		return fmt.Errorf("failed to write the metadata part: %w", err)
 	}
 
+	// provino stores the original under the image's ID, so the part carries no file name
 	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="image"; filename="`+escapeQuotes(filename)+`"`)
+	header.Set("Content-Disposition", `form-data; name="image"`)
 	header.Set("Content-Type", "application/octet-stream")
 
 	part, err := mw.CreatePart(header)
@@ -201,6 +202,7 @@ const DefaultPollInterval = time.Second
 
 // WaitForJob polls a job until it completes or fails, returning its final status
 // An interval of zero or less polls every DefaultPollInterval
+// A poll that provino throttles is tried again at the next interval, since status lookups are rate-limited per caller and a backend may be waiting on many jobs at once
 // Prefer a webhook when one is configured: it reports the outcome without a request every interval
 func (c *Client) WaitForJob(ctx context.Context, namespace string, imageID string, jobID string, interval time.Duration) (JobStatus, error) {
 	// A ticker panics on an interval that isn't positive, which a caller that leaves it unset shouldn't hit
@@ -210,13 +212,18 @@ func (c *Client) WaitForJob(ctx context.Context, namespace string, imageID strin
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var status JobStatus
 	for {
-		status, err := c.Job(ctx, namespace, imageID, jobID)
-		if err != nil {
+		current, err := c.Job(ctx, namespace, imageID, jobID)
+		switch {
+		case IsCode(err, "rate_limited"):
+			// The job's state is still the one read last, so the next tick simply asks again
+		case err != nil:
 			return JobStatus{}, err
-		}
-		if status.Status == JobCompleted || status.Status == JobFailed {
-			return status, nil
+		case current.Status == JobCompleted || current.Status == JobFailed:
+			return current, nil
+		default:
+			status = current
 		}
 
 		select {
@@ -273,8 +280,4 @@ func (c *Client) do(ctx context.Context, method string, path string, contentType
 	}
 
 	return nil
-}
-
-func escapeQuotes(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)
 }

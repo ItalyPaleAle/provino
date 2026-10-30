@@ -49,7 +49,8 @@ type Server struct {
 	appMetrics    *metrics.AppMetrics
 	traceProvider *trace.TracerProvider
 	jobs          actors.Jobs
-	rateLimiter   RateLimiter
+	ingestLimiter RateLimiter
+	statusLimiter RateLimiter
 	store         *store.Store
 	sourceCache   *sourcecache.Cache
 	measurer      SourceMeasurer
@@ -80,7 +81,9 @@ type NewServerOpts struct {
 	// Jobs starts jobs and reads their status
 	Jobs actors.Jobs
 	// Francis rate limiter protecting browser uploads
-	RateLimiter RateLimiter
+	IngestRateLimiter RateLimiter
+	// Francis rate limiter protecting the job status lookups, with a budget of its own
+	StatusRateLimiter RateLimiter
 	// Store where the source images and the generated variants are kept
 	Store *store.Store
 	// Local cache an upload writes a copy of the source into, so the job that follows doesn't download it again
@@ -104,8 +107,11 @@ func NewServer(opts NewServerOpts) (*Server, error) {
 	if opts.Jobs == nil {
 		return nil, errors.New("option Jobs is required")
 	}
-	if opts.RateLimiter == nil {
-		return nil, errors.New("option RateLimiter is required")
+	if opts.IngestRateLimiter == nil {
+		return nil, errors.New("option IngestRateLimiter is required")
+	}
+	if opts.StatusRateLimiter == nil {
+		return nil, errors.New("option StatusRateLimiter is required")
 	}
 	if opts.Store == nil {
 		return nil, errors.New("option Store is required")
@@ -124,7 +130,8 @@ func NewServer(opts NewServerOpts) (*Server, error) {
 		appMetrics:    opts.AppMetrics,
 		traceProvider: opts.TraceProvider,
 		jobs:          opts.Jobs,
-		rateLimiter:   opts.RateLimiter,
+		ingestLimiter: opts.IngestRateLimiter,
+		statusLimiter: opts.StatusRateLimiter,
 		store:         opts.Store,
 		sourceCache:   opts.SourceCache,
 		measurer:      opts.Measurer,
@@ -197,19 +204,23 @@ func (s *Server) initAppServer() (err error) {
 	requireIngest := auth.Middleware(s.authenticator, cfg.Auth.Scopes.Ingest, unauthorized, forbidden)
 	requireServer := auth.Middleware(s.authenticator, cfg.Auth.Scopes.Server, unauthorized, forbidden)
 
+	// Rate limits apply after authentication, so the budget belongs to the caller, and before any work is done: an upload's body isn't read, and a status lookup doesn't reach the actors
+	// Every status lookup activates the image's actor and reads a workflow journal, so polling is held to a budget of its own, separate from the uploads'
+	limitIngest := middlewareRateLimit(s.ingestLimiter)
+	limitStatus := middlewareRateLimit(s.statusLimiter)
+
 	// The public routes are the only ones browsers call, so they're the only ones that answer cross-origin requests
-	// Uploads are rate-limited after authentication, so the budget belongs to the caller, and before the body is read
 	public := http.NewServeMux()
 	if s.authorizer != nil {
-		public.Handle("POST /v1/public/ingest", requireIngest(s.middlewareRateLimit(http.HandlerFunc(s.RouteIngest))))
+		public.Handle("POST /v1/public/ingest", requireIngest(limitIngest(http.HandlerFunc(s.RouteIngest))))
 	}
-	public.Handle("GET /v1/public/images/{namespace}/{imageId}/jobs/{jobId}", requireIngest(http.HandlerFunc(s.RoutePublicJobStatus)))
+	public.Handle("GET /v1/public/images/{namespace}/{imageId}/jobs/{jobId}", requireIngest(limitStatus(http.HandlerFunc(s.RoutePublicJobStatus))))
 	mux.Handle("/v1/public/", middlewareCORS(cfg.Server.CORSAllowedOrigins)(public))
 
 	// The client API is trusted with every namespace, so it's held to the server scope
 	mux.Handle("POST /v1/client/upload", requireServer(http.HandlerFunc(s.RouteUpload)))
 	mux.Handle("POST /v1/client/optimize", requireServer(http.HandlerFunc(s.RouteOptimize)))
-	mux.Handle("GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}", requireServer(http.HandlerFunc(s.RouteClientJobStatus)))
+	mux.Handle("GET /v1/client/images/{namespace}/{imageId}/jobs/{jobId}", requireServer(limitStatus(http.HandlerFunc(s.RouteClientJobStatus))))
 
 	// Middlewares are listed innermost first, since each one wraps the ones before it
 	middlewares := make([]httpserver.Middleware, 0, 6)

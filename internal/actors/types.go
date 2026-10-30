@@ -62,8 +62,6 @@ type VariantSpec struct {
 type JobSource struct {
 	// Format of the original, detected from its content, without a leading dot
 	Format string `json:"format"`
-	// Name of the file the client uploaded
-	Name string `json:"name,omitempty"`
 	// Size of the original in bytes
 	Size int64 `json:"size"`
 	// Size of the original after its EXIF orientation
@@ -101,8 +99,6 @@ type jobSnapshot struct {
 	Previous json.RawMessage `json:"previous,omitempty"`
 	// Format of the original, without a leading dot
 	SourceFormat string `json:"sourceFormat"`
-	// Name of the file that was uploaded
-	SourceName string `json:"sourceName,omitempty"`
 	// Size of the original in bytes, when it's known
 	SourceSize int64 `json:"sourceSize,omitempty"`
 	// Size of the original after its EXIF orientation, when a manifest or the upload recorded it

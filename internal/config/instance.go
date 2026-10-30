@@ -42,7 +42,7 @@ func GetDefaultConfig() *Config {
 			Port:         3000,
 			PublicURL:    "http://127.0.0.1:3000",
 			ReadTimeout:  5 * time.Minute,
-			WriteTimeout: 5 * time.Minute,
+			WriteTimeout: 6 * time.Minute,
 		},
 		Auth: ConfigAuth{
 			Scopes: ConfigAuthScopes{
@@ -58,6 +58,11 @@ func GetDefaultConfig() *Config {
 			Rate:  10,
 			Per:   time.Minute,
 			Burst: 30,
+			Status: ConfigRateLimitStatus{
+				Rate:  600,
+				Per:   time.Minute,
+				Burst: 300,
+			},
 		},
 		Actors: ConfigActors{
 			Runtime:                    ActorRuntimeEmbedded,

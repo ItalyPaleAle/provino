@@ -13,7 +13,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"time"
@@ -150,9 +149,10 @@ func readMetadataPart(mr *multipart.Reader, maxSize int64, into any) (*multipart
 }
 
 // checkImagePart confirms a part is the image
+// The part's file name isn't read: the original is stored under the image's ID, so the name a client gives it doesn't matter
 func checkImagePart(part *multipart.Part) error {
-	if part.FormName() != imagePartName || part.FileName() == "" {
-		return errMissingImage.Clone(httpserver.WithInnerError(fmt.Errorf("expected a file in the '%s' part, but got the part '%s'", imagePartName, part.FormName())))
+	if part.FormName() != imagePartName {
+		return errMissingImage.Clone(httpserver.WithInnerError(fmt.Errorf("expected the '%s' part, but got the part '%s'", imagePartName, part.FormName())))
 	}
 	return nil
 }
@@ -212,7 +212,6 @@ func (s *Server) storeUpload(ctx context.Context, part *multipart.Part, in uploa
 		return actors.JobSource{}, err
 	}
 	source.Format = format
-	source.Name = filepath.Base(part.FileName())
 	source.Size = size
 	source.StoredAt = time.Now().UTC()
 
@@ -235,7 +234,6 @@ func (s *Server) storeUpload(ctx context.Context, part *multipart.Part, in uploa
 		ImageID:      in.imageID.String(),
 		Status:       manifest.StatusStored,
 		SourceKey:    s.store.OriginalKey(in.namespace, in.imageID, format),
-		SourceName:   source.Name,
 		SourceFormat: format,
 		SourceSize:   size,
 		SourceWidth:  source.Width,

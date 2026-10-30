@@ -67,7 +67,7 @@ func TestUploadStreamsTheMetadataFirst(t *testing.T) {
 			return
 		}
 		assert.Equal(t, "image", part.FormName())
-		assert.Equal(t, `my "photo".jpg`, part.FileName())
+		assert.Empty(t, part.FileName())
 		image, err := io.ReadAll(part)
 		assert.NoError(t, err)
 		assert.Equal(t, "image bytes", string(image))
@@ -78,7 +78,7 @@ func TestUploadStreamsTheMetadataFirst(t *testing.T) {
 	accepted, err := c.Upload(t.Context(), UploadMetadata{
 		Namespace: "tenant-1",
 		Variants:  []variant.Spec{{Format: variant.FormatWebP, Quality: 80, Size: variant.Resolution{Width: 100}}},
-	}, `my "photo".jpg`, strings.NewReader("image bytes"))
+	}, strings.NewReader("image bytes"))
 	require.NoError(t, err)
 	assert.Equal(t, "job", accepted.JobID)
 }
@@ -131,6 +131,24 @@ func TestWaitForJobPollsUntilTheJobEnds(t *testing.T) {
 			state = JobCompleted
 		}
 		respond(w, http.StatusOK, JobStatus{JobID: "job", Status: state})
+	})
+
+	status, err := c.WaitForJob(t.Context(), "tenant-1", "img", "job", 10*time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, JobCompleted, status.Status)
+	assert.EqualValues(t, 3, calls.Load())
+}
+
+// A throttled poll is asked again at the next interval rather than ending the wait
+func TestWaitForJobKeepsPollingWhenThrottled(t *testing.T) {
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.Header().Set("Retry-After", "1")
+			respond(w, http.StatusTooManyRequests, Error{Code: "rate_limited", Message: "Rate limit exceeded"})
+			return
+		}
+		respond(w, http.StatusOK, JobStatus{JobID: "job", Status: JobCompleted})
 	})
 
 	status, err := c.WaitForJob(t.Context(), "tenant-1", "img", "job", 10*time.Millisecond)

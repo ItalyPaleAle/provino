@@ -143,7 +143,12 @@ func ParseEd25519PrivateKey(value string) (ed25519.PrivateKey, error) {
 		case ed25519.SeedSize:
 			return ed25519.NewKeyFromSeed(raw), nil
 		case ed25519.PrivateKeySize:
-			return ed25519.PrivateKey(raw), nil
+			// The long form is the seed followed by its public key, and a public half that doesn't match the seed would publish a key no signature verifies against
+			key := ed25519.NewKeyFromSeed(raw[:ed25519.SeedSize])
+			if !key.Equal(ed25519.PrivateKey(raw)) {
+				return nil, errors.New("the private key's public half doesn't match its seed")
+			}
+			return key, nil
 		default:
 			return nil, fmt.Errorf("the private key must be %d or %d bytes long", ed25519.SeedSize, ed25519.PrivateKeySize)
 		}

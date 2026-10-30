@@ -148,6 +148,12 @@ func TestParseEd25519Keys(t *testing.T) {
 		parsedPrivate, err = ParseEd25519PrivateKey("whsk_" + base64.StdEncoding.EncodeToString(private))
 		require.NoError(t, err)
 		assert.Equal(t, private, parsedPrivate)
+
+		// The long form whose public half isn't its seed's is rejected rather than publishing the wrong public key
+		otherPublic, _ := newKey(t)
+		mismatched := append(append([]byte(nil), private.Seed()...), otherPublic...)
+		_, err = ParseEd25519PrivateKey("whsk_" + base64.StdEncoding.EncodeToString(mismatched))
+		require.ErrorContains(t, err, "doesn't match its seed")
 	})
 
 	t.Run("PEM form", func(t *testing.T) {

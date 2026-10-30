@@ -18,7 +18,7 @@ const (
 
 // middlewareClientIP makes the request's remote address the client's own, which is what the request log and the traces record
 //
-// A request from a trusted proxy names its client in X-Forwarded-For, Forwarded or X-Real-IP, and its remote address becomes that client's
+// A request from a trusted proxy names its client in X-Forwarded-For or Forwarded, or in X-Real-IP when it carries neither, and its remote address becomes that client's
 // The forwarding headers are dropped from every request afterwards: the tracing middleware would otherwise report the first X-Forwarded-For entry as the client, which a client can set to anything it likes
 func middlewareClientIP(trustedProxies []netip.Prefix) httpserver.Middleware {
 	return func(next http.Handler) http.Handler {
@@ -44,10 +44,17 @@ func forwardedClient(r *http.Request, trustedProxies []netip.Prefix) (netip.Addr
 		return netip.Addr{}, false
 	}
 
+	// A single proxy may name the client in X-Real-IP instead of a list of hops
+	// A proxy that maintains a list passes X-Real-IP through as the client sent it, though, so it's only read when there's no list at all
+	hops := forwardedHops(r.Header)
+	if len(hops) == 0 {
+		return parseAddr(strings.TrimSpace(r.Header.Get(headerXRealIP)))
+	}
+
 	// Every proxy appends the address it received the request from, so the list is read from the end, past the trusted proxies, and the first address that isn't one is the client
 	// The entries before it were written by the client or by proxies nobody trusts, so they're never read
 	var outermost netip.Addr
-	for _, entry := range slices.Backward(forwardedHops(r.Header)) {
+	for _, entry := range slices.Backward(hops) {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -61,12 +68,6 @@ func forwardedClient(r *http.Request, trustedProxies []netip.Prefix) (netip.Addr
 			return addr, true
 		}
 		outermost = addr
-	}
-
-	// A single proxy may name the client in X-Real-IP instead
-	realIP, ok := parseAddr(strings.TrimSpace(r.Header.Get(headerXRealIP)))
-	if ok {
-		return realIP, true
 	}
 
 	// When every hop is a trusted proxy, the furthest one is as close to the client as the request says
