@@ -27,7 +27,7 @@ func (w *jobWorkflowHandlers) generateVariant(ctx context.Context, task francisw
 	}
 
 	// Permanent failures stop the fan-out immediately while transient failures retain Francis' retry policy
-	result, err := w.generate(ctx, input)
+	result, err := w.generate(ctx, task.Index(), input)
 	if err == nil {
 		return result, nil
 	}
@@ -38,18 +38,16 @@ func (w *jobWorkflowHandlers) generateVariant(ctx context.Context, task francisw
 	return nil, err
 }
 
-// Generate the variant and return the result recorded by the workflow
-func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (VariantResult, error) {
+// Generate the variant at a position of the fan-out and return the result recorded by the workflow
+func (w *jobWorkflowHandlers) generate(ctx context.Context, index int, task variantTask) (VariantResult, error) {
 	log := w.runtime.Log.With(
 		slog.String("imageId", task.ImageID),
-		slog.Int("index", task.Spec.Index),
+		slog.Int("index", index),
 		slog.String("format", string(task.Spec.Format)),
 		slog.String("box", task.Spec.Resolution.String()),
 	)
 
-	result := VariantResult{
-		Index: task.Spec.Index,
-	}
+	var result VariantResult
 	// A box the source can't fill, whose pixels another variant of this job holds, encodes nothing: the manifest repeats the holder's file for it
 	if task.Skip != nil {
 		skip := *task.Skip
@@ -84,7 +82,7 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	if err != nil {
 		w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), false, duration)
 		log.ErrorContext(ctx, "Failed to generate variant", slog.Any("error", err))
-		return VariantResult{}, fmt.Errorf("failed to generate variant %d: %w", task.Spec.Index, err)
+		return VariantResult{}, fmt.Errorf("failed to generate variant %d: %w", index, err)
 	}
 
 	result.Width = res.Width
@@ -185,7 +183,7 @@ func (w *jobWorkflowHandlers) deleteVariant(ctx context.Context, compensation fr
 		return errors.Join(actor.ErrJobPermanentFailure, err)
 	}
 	if !w.runtime.Store.OwnsKey(namespace, imageID, result.Key) {
-		return errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("the key '%s' recorded for variant %d isn't one of the image's objects", result.Key, input.Spec.Index))
+		return errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("the key '%s' recorded for variant %d isn't one of the image's objects", result.Key, compensation.Index()))
 	}
 
 	err = w.runtime.Store.RemoveVariant(ctx, result.Key)
@@ -194,7 +192,7 @@ func (w *jobWorkflowHandlers) deleteVariant(ctx context.Context, compensation fr
 	}
 
 	w.runtime.Log.InfoContext(ctx, "Removed a generated variant while compensating the job",
-		slog.Int("index", input.Spec.Index),
+		slog.Int("index", compensation.Index()),
 		slog.String("key", result.Key),
 	)
 	return nil

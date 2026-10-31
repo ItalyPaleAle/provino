@@ -54,13 +54,8 @@ func (s *jobService) start(ctx context.Context, req JobRequest) error {
 		return err
 	}
 
-	// The position is the fan-out identity, so normalize it before the input becomes durable
-	req.Variants = append([]VariantSpec(nil), req.Variants...)
-	for i := range req.Variants {
-		req.Variants[i].Index = i
-	}
 	// The input is stored in UTC, like every time provino records
-	// A request the image actor kept in its state comes back from Francis in the local zone, so it's converted rather than trusted
+	// A request that reached the image actor from another host was decoded by Francis in the local zone, so it's converted rather than trusted
 	if req.RequestedAt.IsZero() {
 		req.RequestedAt = time.Now()
 	}

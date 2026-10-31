@@ -228,7 +228,6 @@ func (w *jobWorkflowHandlers) prepare(ctx context.Context, task francisworkflow.
 	skippedCount := 0
 	needsSource := false
 	for i, spec := range req.Variants {
-		spec.Index = i
 		tasks[i] = variantTask{
 			Namespace:    namespace,
 			ImageID:      imageID.String(),
@@ -449,7 +448,7 @@ func (w *jobWorkflowHandlers) writeManifest(ctx context.Context, task franciswor
 		if previous != nil {
 			return *previous, nil
 		}
-		stored := storedManifest(imagekeys.New(), req, snap, namespace, imageID)
+		stored := storedManifest(req, snap, namespace, imageID)
 		err = w.runtime.Store.WriteManifest(ctx, namespace, imageID, stored)
 		if err != nil {
 			return nil, fmt.Errorf("failed to write the manifest: %w", err)
@@ -471,12 +470,7 @@ func (w *jobWorkflowHandlers) writeManifest(ctx context.Context, task franciswor
 		return nil, errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("variant result count %d does not match the prepared count %d", len(results), len(tasks)))
 	}
 
-	// The fan-out is fail-fast, so every durable output belongs to a variant that was stored successfully
-	for i := range results {
-		results[i].Index = i
-	}
-
-	m, err := buildManifest(imagekeys.New(), req, snap, tasks[0].SourceSize, results)
+	m, err := buildManifest(req, snap, tasks[0].SourceSize, results)
 	if err != nil {
 		return nil, errors.Join(actor.ErrJobPermanentFailure, err)
 	}
@@ -751,13 +745,13 @@ func failureMessage(cause string) string {
 }
 
 // Build the manifest of an image whose original is stored and that has no variants yet
-func storedManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, namespace string, imageID uuid.UUID) manifest.Manifest {
+func storedManifest(req JobRequest, snap jobSnapshot, namespace string, imageID uuid.UUID) manifest.Manifest {
 	return manifest.Manifest{
 		Version:      manifest.Version,
 		Namespace:    namespace,
 		ImageID:      imageID.String(),
 		Status:       manifest.StatusStored,
-		SourceKey:    layout.OriginalKey(namespace, imageID, snap.SourceFormat),
+		SourceKey:    imagekeys.OriginalKey(namespace, imageID, snap.SourceFormat),
 		SourceFormat: snap.SourceFormat,
 		SourceSize:   snap.SourceSize,
 		SourceWidth:  snap.SourceResolution.Width,
@@ -769,7 +763,7 @@ func storedManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, n
 }
 
 // Build the manifest a completed job stores, which the webhook also carries
-func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, source imaging.Resolution, results []VariantResult) (manifest.Manifest, error) {
+func buildManifest(req JobRequest, snap jobSnapshot, source imaging.Resolution, results []VariantResult) (manifest.Manifest, error) {
 	if len(req.Variants) != len(results) {
 		return manifest.Manifest{}, fmt.Errorf("variant result count %d does not match the requested count %d", len(results), len(req.Variants))
 	}
@@ -778,7 +772,7 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 		return manifest.Manifest{}, fmt.Errorf("invalid image ID: %w", err)
 	}
 
-	m := storedManifest(layout, req, snap, req.Namespace, imageID)
+	m := storedManifest(req, snap, req.Namespace, imageID)
 	m.Status = manifest.StatusCompleted
 	m.JobID = req.JobID
 	m.SourceWidth = source.Width

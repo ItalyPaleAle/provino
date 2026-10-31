@@ -128,11 +128,11 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	now := time.Now()
 	snap := jobSnapshot{SourceFormat: "png", SourceSize: 999, StartedAt: now}
 	results := []VariantResult{
-		{Index: 0, Key: holderKey, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
-		{Index: 1, CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},
+		{Key: holderKey, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
+		{CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},
 	}
 
-	m, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{Width: 800, Height: 800}, results)
+	m, err := buildManifest(req, snap, imaging.Resolution{Width: 800, Height: 800}, results)
 	require.NoError(t, err)
 	assert.Equal(t, manifest.Version, m.Version)
 	assert.Equal(t, manifest.StatusCompleted, m.Status)
@@ -161,16 +161,16 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 
 	t.Run("a skip pointing at another skipped variant is rejected", func(t *testing.T) {
 		broken := []VariantResult{
-			{Index: 0, Skipped: &SkippedVariant{Index: 1}},
-			{Index: 1, Skipped: &SkippedVariant{Index: 0}},
+			{Skipped: &SkippedVariant{Index: 1}},
+			{Skipped: &SkippedVariant{Index: 0}},
 		}
-		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
+		_, err := buildManifest(req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})
 
 	t.Run("an encoded variant without a key is rejected", func(t *testing.T) {
-		broken := []VariantResult{{Index: 0, Width: 800, Height: 800, Size: 1234}, results[1]}
-		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
+		broken := []VariantResult{{Width: 800, Height: 800, Size: 1234}, results[1]}
+		_, err := buildManifest(req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "records no key")
 	})
 
@@ -178,10 +178,10 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	t.Run("a reused variant keeps its stored key", func(t *testing.T) {
 		stored := manifest.Variant{Key: "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_800x800.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 4, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain, Width: 800, Height: 800, Size: 1234}
 		reused := []VariantResult{
-			{Index: 0, Width: 800, Height: 800, Size: 1234, CompletedAt: now, Reused: &stored},
+			{Width: 800, Height: 800, Size: 1234, CompletedAt: now, Reused: &stored},
 			results[1],
 		}
-		m, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{Width: 800, Height: 800}, reused)
+		m, err := buildManifest(req, snap, imaging.Resolution{Width: 800, Height: 800}, reused)
 		require.NoError(t, err)
 		assert.Equal(t, stored.Key, m.Variants[0].Key)
 		assert.Equal(t, 4, m.Variants[0].Effort)
@@ -189,19 +189,19 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	})
 
 	t.Run("a skip pointing outside the job is rejected", func(t *testing.T) {
-		broken := []VariantResult{results[0], {Index: 1, Skipped: &SkippedVariant{Index: 7}}}
-		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
+		broken := []VariantResult{results[0], {Skipped: &SkippedVariant{Index: 7}}}
+		_, err := buildManifest(req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})
 }
 
 func TestAssignFileIDs(t *testing.T) {
 	imageID := uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
-	existing := manifest.Variant{Key: imagekeys.New().AssetKey("default", imageID, 800, 600, "00000002", imaging.FormatWebP)}
+	existing := manifest.Variant{Key: imagekeys.AssetKey("default", imageID, 800, 600, "00000002", imaging.FormatWebP)}
 	previous := &manifest.Manifest{Variants: []manifest.Variant{
 		existing,
 		// A name an older layout gave a file has no file ID to avoid
-		{Key: imagekeys.New().Prefix("default", imageID) + imageID.String() + "_400x300.webp"},
+		{Key: imagekeys.Prefix("default", imageID) + imageID.String() + "_400x300.webp"},
 	}}
 	tasks := []variantTask{
 		{},

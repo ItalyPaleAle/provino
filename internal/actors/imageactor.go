@@ -25,7 +25,7 @@ const (
 // Bounds on the jobs the actor remembers after they finish, which it keeps only so a browser can read the status of its own jobs
 const (
 	maxHistory = 50
-	// How soon the actor checks on a job it's about to start, so a process that stops before the workflow starts leaves an alarm behind to start it
+	// How soon the actor checks on a job it's about to start, so a process that stops before the workflow starts leaves an alarm behind to free the image
 	checkStartAfter = 30 * time.Second
 	// How often the actor looks at a running job, so one whose release never arrived holds the image for a minute rather than until its deadline
 	activePollInterval = time.Minute
@@ -66,11 +66,6 @@ type activeJob struct {
 	JobID       string    `json:"jobId"`
 	SubjectHash string    `json:"subjectHash,omitempty"`
 	StartedAt   time.Time `json:"startedAt"`
-	// The job's request, kept until its workflow is known to exist, so a start that never happened can be made again
-	Request *JobRequest `json:"request,omitempty"`
-	// How long finished journals were retained when the job became active, zero for indefinitely
-	// The retention can change across restarts, and the journal could have been purged under either value, so heal goes by the shorter of this one and the current one
-	Retention time.Duration `json:"retention,omitempty"`
 }
 
 type finishedJob struct {
@@ -211,7 +206,7 @@ func (a *imageActor) Peek(ctx context.Context, method string, data actor.Envelop
 	return jobLookup{}, nil
 }
 
-// Alarm is the actor's safety net: it frees the image when its active job ended without telling it, starts an active job whose workflow never started, and prunes the history
+// Alarm is the actor's safety net: it frees the image when its active job ended or never started without telling it, and prunes the history
 func (a *imageActor) Alarm(ctx context.Context, _ string, _ actor.Envelope) error {
 	state, err := a.client.GetState(ctx)
 	if err != nil {
@@ -353,44 +348,26 @@ func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult
 	return finishedResult{FinishedAt: finishedAt}, nil
 }
 
-// Free the image when the active job's workflow has ended, and start the workflow when it never did
+// Free the image when the active job's workflow has ended or doesn't exist
 // It reports whether it changed the state, which then has to be saved
+//
+// Francis reports a workflow that was started but isn't running yet as pending, so one that isn't found was either never started or already purged
+// Either way the job is over: a job becomes active only on its way to being started, so one whose workflow never started belongs to a start that failed or never returned, and its caller was told so
 func (a *imageActor) heal(ctx context.Context, state *imageState) (bool, error) {
 	if state.Active == nil {
 		return false, nil
 	}
 
+	// A workflow that exists and hasn't ended keeps the image busy
 	status, found, err := a.jobs.instanceStatus(ctx, a.namespace, a.imageID, state.Active.JobID)
 	if err != nil {
 		return false, fmt.Errorf("failed to check on the active job: %w", err)
 	}
-	changed := false
-	if found {
-		// The workflow exists, so the request isn't needed to start it again
-		if state.Active.Request != nil {
-			state.Active.Request = nil
-			changed = true
-		}
-		if !isTerminal(status) {
-			return changed, nil
-		}
+	if found && !isTerminal(status) {
+		return false, nil
 	}
 
-	// A workflow that doesn't exist was never started when its journal can't have been purged yet, which is what a process stopping between recording the job and starting it leaves behind
-	// Starting it now is safe, because a start that did happen after all is found by its job ID and discarded
-	if !found && state.Active.Request != nil && !a.couldBePurged(state.Active, time.Now()) {
-		err = a.jobs.start(ctx, *state.Active.Request)
-		if err != nil {
-			// The job stays active, and the next check tries again
-			a.runtime.Log.WarnContext(ctx, "Failed to start an active job whose workflow never started", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.String("jobId", state.Active.JobID), slog.Any("error", err))
-			return false, nil
-		}
-		a.runtime.Log.WarnContext(ctx, "Started an active job whose workflow never started", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.String("jobId", state.Active.JobID))
-		state.Active.Request = nil
-		return true, nil
-	}
-
-	a.runtime.Log.WarnContext(ctx, "Freed an image whose active job ended without reporting back",
+	a.runtime.Log.WarnContext(ctx, "Freed an image whose active job ended or never started without reporting back",
 		slog.String("namespace", a.namespace),
 		slog.String("imageId", a.imageID),
 		slog.String("jobId", state.Active.JobID),
@@ -398,19 +375,6 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) (bool, error) 
 	)
 	a.finishActive(state)
 	return true, nil
-}
-
-// Report whether the journal of an active job's workflow could have been purged by now
-// It can only be purged once the retention has passed after the workflow completed, which is after the job became active
-//
-// The retention may have changed since the job became active, so the shorter of the two values counts: raising it doesn't bring back a journal the old value already purged
-// A zero retention keeps journals indefinitely, so it never counts as the shorter one; the job recorded zero too when it became active before the retention was recorded at all
-func (a *imageActor) couldBePurged(active *activeJob, now time.Time) bool {
-	retention := a.runtime.CompletedWorkflowRetention
-	if active.Retention > 0 && (retention <= 0 || active.Retention < retention) {
-		retention = active.Retention
-	}
-	return retention > 0 && now.Sub(active.StartedAt) >= retention
 }
 
 // Move the active job to the history, returning when it finished
@@ -430,7 +394,7 @@ func (a *imageActor) finishActive(state *imageState) time.Time {
 
 // Record a job as active and start its workflow
 //
-// The job is recorded as active before its workflow is started, so a crash in between leaves an active job whose workflow doesn't exist, which heal starts or frees, rather than a running workflow the actor doesn't know about, which nothing would stop another job from racing
+// The job is recorded as active before its workflow is started, so a crash in between leaves an active job whose workflow doesn't exist, which heal frees, rather than a running workflow the actor doesn't know about, which nothing would stop another job from racing
 func (a *imageActor) activate(ctx context.Context, state *imageState, req JobRequest) error {
 	// The check is scheduled before the job is recorded as active, so a process that stops between the two leaves an alarm behind to find the job
 	err := a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: time.Now().Add(checkStartAfter)})
@@ -438,18 +402,16 @@ func (a *imageActor) activate(ctx context.Context, state *imageState, req JobReq
 		return fmt.Errorf("failed to schedule the image's check: %w", err)
 	}
 
-	state.Active = &activeJob{JobID: req.JobID, SubjectHash: req.SubjectHash, StartedAt: time.Now().UTC(), Request: &req, Retention: a.runtime.CompletedWorkflowRetention}
+	state.Active = &activeJob{JobID: req.JobID, SubjectHash: req.SubjectHash, StartedAt: time.Now().UTC()}
 	err = a.client.SetState(ctx, *state, nil)
 	if err != nil {
 		state.Active = nil
 		return fmt.Errorf("failed to record the active job: %w", err)
 	}
 
-	// The request is dropped whatever the outcome: a workflow that started no longer needs it, and a job whose start failed is never started again, since its caller is told it wasn't accepted
 	// A failed start still leaves the job active, because Francis may have recorded the start before the failure, such as when its answer timed out
 	// The next heal then keeps the image busy if the workflow exists and frees it otherwise, so a workflow that did start never runs alongside another job of the image
 	err = a.jobs.start(ctx, req)
-	state.Active.Request = nil
 	if err != nil {
 		return fmt.Errorf("failed to start the job: %w", err)
 	}

@@ -41,9 +41,8 @@ const (
 )
 
 // VariantSpec describes one variant a job has to generate, in the form the workflow carries it
+// Its position in the job's variants is what identifies it, in the fan-out and in the manifest
 type VariantSpec struct {
-	// Position of the variant within the job, which identifies it in the fan-out
-	Index int `json:"index"`
 	// Format the variant is encoded to
 	Format imaging.Format `json:"format"`
 	// Encoder quality, for lossy formats
@@ -138,9 +137,8 @@ type SkippedVariant struct {
 
 // VariantResult is the output of one item in the generation fan-out
 // The fan-out fails as soon as one variant does, so a result is only ever recorded for a variant that's available
+// Francis journals the results in the order of the fan-out's items, so a result's position is its variant's
 type VariantResult struct {
-	// Index of the variant within the job
-	Index int `json:"index"`
 	// Size of the encoded variant, in bytes
 	Size int64 `json:"size,omitempty"`
 	// Actual width of the variant, which can be smaller than requested when fitting inside the requested box

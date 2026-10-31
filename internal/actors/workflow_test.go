@@ -118,7 +118,7 @@ func previousManifest(imageID uuid.UUID) manifest.Manifest {
 		Status:       manifest.StatusCompleted,
 		SourceFormat: "png",
 		Variants: []manifest.Variant{{
-			Key:    imagekeys.New().AssetKey(testNamespace, imageID, 100, 75, "0000000b", imaging.FormatWebP),
+			Key:    imagekeys.AssetKey(testNamespace, imageID, 100, 75, "0000000b", imaging.FormatWebP),
 			Format: imaging.FormatWebP, Quality: 80, Resolution: imaging.Resolution{Width: 100, Height: 100},
 			Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9,
 		}},
@@ -240,7 +240,7 @@ func TestReusableVariantsRequiresTheManifestEntryAndStoredObject(t *testing.T) {
 	// A skipped entry repeats another entry's file, so it never stands for a file of its own
 	skipped := manifest.Variant{Key: existing.Key, Format: imaging.FormatWebP, Quality: 80, Resolution: box(300, 300), Fit: imaging.FitContain, Width: 100, Height: 75, Size: 9, Skipped: true, SkippedFor: &imaging.Resolution{Width: 100, Height: 100}}
 	// A file stored under an older layout's name is found by the key its entry records
-	legacy := manifest.Variant{Key: imagekeys.New().Prefix(testNamespace, imageID) + imageID.String() + "_400x300.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: box(400, 400), Fit: imaging.FitContain, Width: 400, Height: 300, Size: 11}
+	legacy := manifest.Variant{Key: imagekeys.Prefix(testNamespace, imageID) + imageID.String() + "_400x300.webp", Format: imaging.FormatWebP, Quality: 80, Resolution: box(400, 400), Fit: imaging.FitContain, Width: 400, Height: 300, Size: 11}
 	// A key that names another image's file is never trusted, even when that file exists
 	other := uuid.NewV4()
 	foreign := manifest.Variant{Key: imageStore.AssetKey(testNamespace, other, 500, 375, "00000003", imaging.FormatWebP), Format: imaging.FormatWebP, Quality: 80, Resolution: box(500, 500), Fit: imaging.FitContain, Width: 500, Height: 375, Size: 13}
@@ -272,7 +272,7 @@ func TestReusableVariantsRequiresTheManifestEntryAndStoredObject(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, existing, entry)
 
-	result, err := handlers.generate(t.Context(), variantTask{
+	result, err := handlers.generate(t.Context(), 0, variantTask{
 		Namespace: testNamespace,
 		ImageID:   imageID.String(),
 		Spec:      VariantSpec{Format: existing.Format, Quality: 80, Resolution: existing.Resolution},
@@ -891,15 +891,14 @@ func assertVariantKey(t *testing.T, imageID uuid.UUID, entry manifest.Variant) {
 
 	fileID := imagekeys.FileIDOf(entry.Key)
 	require.NotEmpty(t, fileID, entry.Key)
-	assert.Equal(t, imagekeys.New().AssetKey(testNamespace, imageID, entry.Width, entry.Height, fileID, entry.Format), entry.Key)
+	assert.Equal(t, imagekeys.AssetKey(testNamespace, imageID, entry.Width, entry.Height, fileID, entry.Format), entry.Key)
 }
 
 // List the keys of the variant files stored for an image, which the file system store keeps as files under the image's prefix
 func storedVariantKeys(t *testing.T, imageID uuid.UUID) []string {
 	t.Helper()
 
-	layout := imagekeys.New()
-	prefix := layout.Prefix(testNamespace, imageID)
+	prefix := imagekeys.Prefix(testNamespace, imageID)
 	entries, err := os.ReadDir(filepath.Join(config.Get().Storage.Variants, filepath.FromSlash(prefix)))
 	if os.IsNotExist(err) {
 		return nil
@@ -909,7 +908,7 @@ func storedVariantKeys(t *testing.T, imageID uuid.UUID) []string {
 	keys := make([]string, 0, len(entries))
 	for _, e := range entries {
 		key := prefix + e.Name()
-		if !strings.HasPrefix(e.Name(), imageID.String()+"_") || key == layout.ManifestKey(testNamespace, imageID) {
+		if !strings.HasPrefix(e.Name(), imageID.String()+"_") || key == imagekeys.ManifestKey(testNamespace, imageID) {
 			continue
 		}
 		keys = append(keys, key)
@@ -923,7 +922,7 @@ func storedVariantKeys(t *testing.T, imageID uuid.UUID) []string {
 func holdJobs(t *testing.T, imageID uuid.UUID) (resume func()) {
 	t.Helper()
 
-	path := filepath.Join(config.Get().Storage.Variants, filepath.FromSlash(imagekeys.New().ManifestKey(testNamespace, imageID)))
+	path := filepath.Join(config.Get().Storage.Variants, filepath.FromSlash(imagekeys.ManifestKey(testNamespace, imageID)))
 	err := os.Remove(path)
 	require.NoError(t, err)
 	err = os.Mkdir(path, 0o750)
@@ -1040,58 +1039,7 @@ func TestImageActorFreesAStaleActiveJob(t *testing.T) {
 	host.waitForJob(t, imageID, jobID, StatusCompleted)
 }
 
-// A process that stops after recording a job as active and before starting its workflow leaves the alarm scheduled first, which starts the job rather than dropping it
-func TestImageActorStartsAnActiveJobThatNeverStarted(t *testing.T) {
-	host := startTestHost(t, testHostOptions{})
-
-	imageID := uuid.NewV4()
-	source := host.upload(t, imageID, 800, 600)
-	jobID := uuid.NewV7().String()
-	request := JobRequest{JobID: jobID, Namespace: testNamespace, ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec(100, 100)}, RequestedAt: time.Now()}
-
-	// This is what the actor writes before it starts a workflow: the alarm first, then the active job with its request
-	actorID := imageActorID(testNamespace, imageID.String())
-	err := host.host.SetAlarm(t.Context(), imageActorType, actorID, alarmCheck, actor.AlarmProperties{DueTime: time.Now()})
-	require.NoError(t, err)
-	err = host.host.SetState(t.Context(), imageActorType, actorID, imageState{
-		Active: &activeJob{JobID: jobID, StartedAt: time.Now(), Request: &request},
-	}, nil)
-	require.NoError(t, err)
-
-	// Until the alarm fires, the job reads as running, and then it runs for real
-	host.waitForJob(t, imageID, jobID, StatusCompleted)
-	m := host.manifest(t, imageID)
-	assert.Equal(t, jobID, m.JobID)
-}
-
-// A job whose journal the retention in effect when it became active could have purged is freed rather than run again, even after the retention was raised
-func TestImageActorFreesAJobWhoseJournalCouldBePurged(t *testing.T) {
-	host := startTestHost(t, testHostOptions{configure: func(c *config.Config) {
-		c.Actors.CompletedWorkflowRetention = 24 * time.Hour
-	}})
-
-	imageID := uuid.NewV4()
-	source := host.upload(t, imageID, 800, 600)
-	staleID := uuid.NewV7().String()
-	request := JobRequest{JobID: staleID, Namespace: testNamespace, ImageID: imageID.String(), Source: &source, Variants: []VariantSpec{webpSpec(100, 100)}, RequestedAt: time.Now()}
-
-	// The job became active two hours ago, when the retention was an hour, and its start was never confirmed
-	err := host.host.SetState(t.Context(), imageActorType, imageActorID(testNamespace, imageID.String()), imageState{
-		Active: &activeJob{JobID: staleID, StartedAt: time.Now().Add(-2 * time.Hour), Request: &request, Retention: time.Hour},
-	}, nil)
-	require.NoError(t, err)
-
-	jobID := host.startJob(t, JobRequest{ImageID: imageID.String(), Variants: []VariantSpec{webpSpec(200, 200)}})
-	host.waitForJob(t, imageID, jobID, StatusCompleted)
-
-	// The stale job never ran, so it has no status and the manifest is the new job's
-	_, _, found, err := host.Jobs().Status(t.Context(), testNamespace, imageID.String(), staleID)
-	require.NoError(t, err)
-	assert.False(t, found)
-	assert.Equal(t, jobID, host.manifest(t, imageID).JobID)
-}
-
-// A start that fails may have been recorded by Francis anyway, so its job stays active without the request heal would start it from: a workflow that exists keeps the image busy, and one that doesn't is freed rather than started
+// A start that fails may have been recorded by Francis anyway, so its job stays active: a workflow that exists keeps the image busy, and one that doesn't is freed
 func TestImageActorKeepsAJobWhoseStartFailed(t *testing.T) {
 	host := startTestHost(t, testHostOptions{})
 
@@ -1107,7 +1055,6 @@ func TestImageActorKeepsAJobWhoseStartFailed(t *testing.T) {
 	err = host.host.Service().GetState(t.Context(), imageActorType, imageActorID(testNamespace, imageID.String()), &state)
 	require.NoError(t, err)
 	require.NotNil(t, state.Active)
-	assert.Nil(t, state.Active.Request)
 	failedID := state.Active.JobID
 
 	// This start never reached Francis, so the next job frees the image and runs, and the failed one never does
@@ -1116,30 +1063,6 @@ func TestImageActorKeepsAJobWhoseStartFailed(t *testing.T) {
 	_, found, err := host.jobs.jobs.instanceStatus(t.Context(), testNamespace, imageID.String(), failedID)
 	require.NoError(t, err)
 	assert.False(t, found)
-}
-
-func TestImageActorCouldBePurged(t *testing.T) {
-	now := time.Now()
-	startedAt := now.Add(-2 * time.Hour)
-	tests := map[string]struct {
-		current  time.Duration
-		recorded time.Duration
-		want     bool
-	}{
-		"within the retention":                          {current: 24 * time.Hour, recorded: 24 * time.Hour, want: false},
-		"past the retention":                            {current: time.Hour, recorded: time.Hour, want: true},
-		"raised after the job became active":            {current: 24 * time.Hour, recorded: time.Hour, want: true},
-		"lowered after the job became active":           {current: time.Hour, recorded: 24 * time.Hour, want: true},
-		"indefinite now, but not when it became active": {current: 0, recorded: time.Hour, want: true},
-		"indefinite when it became active":              {current: time.Hour, recorded: 0, want: true},
-		"indefinite throughout":                         {current: 0, recorded: 0, want: false},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			a := &imageActor{runtime: &Runtime{CompletedWorkflowRetention: tt.current}}
-			assert.Equal(t, tt.want, a.couldBePurged(&activeJob{StartedAt: startedAt, Retention: tt.recorded}, now))
-		})
-	}
 }
 
 func TestRegenerationReusesExistingResolutionsAndGeneratesOnlyMissingOnes(t *testing.T) {
@@ -1249,7 +1172,7 @@ func TestRegenerationReplacesEnlargedFiles(t *testing.T) {
 	source := host.upload(t, imageID, 800, 800)
 
 	// A manifest listing a 1000x1000 file enlarged from the 800x800 source, stored under the name the older layout gave it
-	enlargedKey := imagekeys.New().Prefix(testNamespace, imageID) + imageID.String() + "_1000x1000.webp"
+	enlargedKey := imagekeys.Prefix(testNamespace, imageID) + imageID.String() + "_1000x1000.webp"
 	err := host.store.SaveVariant(t.Context(), enlargedKey, []byte("enlarged"), "image/webp")
 	require.NoError(t, err)
 	err = host.store.WriteManifest(t.Context(), testNamespace, imageID, manifest.Manifest{

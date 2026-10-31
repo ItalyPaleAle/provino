@@ -101,9 +101,6 @@ type Config struct {
 	// Logs contains configuration for logging
 	Logs ConfigLogs `yaml:"logs"`
 
-	// Dev is meant for development only; it's undocumented
-	Dev ConfigDev `yaml:"-"`
-
 	// Internal keys
 	internal internal `yaml:"-"`
 }
@@ -566,10 +563,6 @@ type ConfigLogs struct {
 	// If true, emits logs formatted as JSON, otherwise uses a text-based structured log format.
 	// Defaults to false if a TTY is attached (e.g. when running the binary directly in the terminal or in development); true otherwise.
 	JSON bool `yaml:"json"`
-}
-
-// ConfigDev includes options using during development only
-type ConfigDev struct {
 }
 
 // Internal properties

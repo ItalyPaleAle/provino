@@ -2,6 +2,11 @@
 //
 // Applications that serve the variants, or that read the original back, address the same objects in the same stores, so the layout is a contract rather than an implementation detail
 // A variant's key ends with a random file ID, so readers find the variants through the manifest, which records the full key of every object it describes
+//
+// Every object is written under two folder levels taken from its image ID, so no single folder holds every image of a namespace
+// The layout does not vary by backend: an object store treats a key as opaque and would be happy with one folder per namespace, but a namespace accumulating thousands of images makes that folder unusable to browse, list or reason about, and a local file system degrades outright
+//
+// The namespace passed to every function that builds a key must have been checked with ValidateNamespace
 package imagekeys
 
 import (
@@ -29,22 +34,9 @@ const fileIDBytes = 4
 // A file ID is the random part of a variant's key, in lowercase hex
 var fileIDRegex = regexp.MustCompile(`^[0-9a-f]{8}$`)
 
-// Layout builds the keys of the objects belonging to one image
-//
-// Every object is written under two folder levels taken from its image ID, so no single folder holds every image of a namespace
-// The layout does not vary by backend: an object store treats a key as opaque and would be happy with one folder per namespace, but a namespace accumulating thousands of images makes that folder unusable to browse, list or reason about, and a local file system degrades outright
-//
-// The namespace passed to every method must have been checked with ValidateNamespace
-type Layout struct{}
-
-// New creates a Layout
-func New() Layout {
-	return Layout{}
-}
-
 // OriginalKey returns the key of the source image that was uploaded
-func (l Layout) OriginalKey(namespace string, imageID uuid.UUID, format string) string {
-	return l.prefix(namespace, imageID) + imageID.String() + "_orig" + extension(format)
+func OriginalKey(namespace string, imageID uuid.UUID, format string) string {
+	return Prefix(namespace, imageID) + imageID.String() + "_orig" + extension(format)
 }
 
 // AssetKey returns the key of one generated variant of an image, for example "<imageId>_1200x800_3f9a0c1e.webp"
@@ -52,29 +44,25 @@ func (l Layout) OriginalKey(namespace string, imageID uuid.UUID, format string) 
 // The size is the one the file came out at, so the name tells what's in it, and the file ID is random, so every file a job encodes is a new object
 // A key is written once and its bytes never change, which is what lets an application serve it as immutable and lets a failed job delete every file it wrote
 // The file ID must have been made by NewFileID or checked with ValidateFileID
-func (l Layout) AssetKey(namespace string, imageID uuid.UUID, width int, height int, fileID string, format variant.Format) string {
-	return l.prefix(namespace, imageID) + imageID.String() + "_" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + "_" + fileID + format.Extension()
+func AssetKey(namespace string, imageID uuid.UUID, width int, height int, fileID string, format variant.Format) string {
+	return Prefix(namespace, imageID) + imageID.String() + "_" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + "_" + fileID + format.Extension()
 }
 
 // OwnsKey reports whether a key names an object of one image: one stored under the image's prefix, with a name that starts with the image's ID
 // Keys read back from a manifest are checked with it, so a manifest can only ever point a job at the files of its own image
-func (l Layout) OwnsKey(namespace string, imageID uuid.UUID, key string) bool {
-	name, found := strings.CutPrefix(key, l.prefix(namespace, imageID)+imageID.String()+"_")
+func OwnsKey(namespace string, imageID uuid.UUID, key string) bool {
+	name, found := strings.CutPrefix(key, Prefix(namespace, imageID)+imageID.String()+"_")
 	return found && name != "" && !strings.Contains(name, "/") && !strings.Contains(name, "..")
 }
 
 // ManifestKey returns the key of the manifest describing everything generated for an image
-func (l Layout) ManifestKey(namespace string, imageID uuid.UUID) string {
-	return l.prefix(namespace, imageID) + imageID.String() + "_" + manifestName
+func ManifestKey(namespace string, imageID uuid.UUID) string {
+	return Prefix(namespace, imageID) + imageID.String() + "_" + manifestName
 }
 
 // Prefix returns the folder every object of one image is written under
 // It is what a caller lists to find them, and what it deletes to remove them
-func (l Layout) Prefix(namespace string, imageID uuid.UUID) string {
-	return l.prefix(namespace, imageID)
-}
-
-func (l Layout) prefix(namespace string, imageID uuid.UUID) string {
+func Prefix(namespace string, imageID uuid.UUID) string {
 	return namespace + "/" + shard(imageID) + "/"
 }
 

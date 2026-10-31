@@ -550,11 +550,10 @@ func TestJWKSRoute(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "application/jwk-set+json", rec.Header().Get("Content-Type"))
 
-	set := decodeBody[webhook.JWKS](t, rec)
-	require.Len(t, set.Keys, 1)
-	assert.Equal(t, keys.ActiveKeyID(), set.Keys[0].Kid)
-	_, err = set.Ed25519Keys()
+	// The route serves the key set as the signer publishes it
+	published, err := keys.JWKS()
 	require.NoError(t, err)
+	assert.JSONEq(t, string(published), rec.Body.String())
 }
 
 func TestIngest(t *testing.T) {

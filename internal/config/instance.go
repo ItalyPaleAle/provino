@@ -6,11 +6,7 @@ import (
 	configkit "github.com/italypaleale/go-kit/config"
 )
 
-var (
-	config *Config
-
-	defaultDevConfig ConfigDev
-)
+var config *Config
 
 func init() {
 	// Set the default config at startup
@@ -81,6 +77,5 @@ func GetDefaultConfig() *Config {
 			MaxVariants:     48,
 			MaxResolution:   8192,
 		},
-		Dev: defaultDevConfig,
 	}
 }

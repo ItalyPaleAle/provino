@@ -94,9 +94,8 @@ func TestEd25519KeySet(t *testing.T) {
 	_, previousWHSK, _ := keyForms(t, previous)
 	keys, err := LoadKeySet(config.ConfigSigningEd25519{Keys: []string{withKid(activeJWK, "2026-10"), previousWHSK}})
 	require.NoError(t, err)
-	assert.Equal(t, "2026-10", keys.ActiveKeyID())
 
-	// The published set holds both keys, the second under the ID derived from its public key
+	// The published set holds both keys, the first under its own kid and the second under the ID derived from its public key
 	jwks, err := keys.JWKS()
 	require.NoError(t, err)
 	var set webhook.JWKS
@@ -104,11 +103,9 @@ func TestEd25519KeySet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, set.Keys, 2)
 	assert.Equal(t, "2026-10", set.Keys[0].Kid)
+	assert.Equal(t, base64.RawURLEncoding.EncodeToString(activePublic), set.Keys[0].X)
 	sum := sha256.Sum256(previousPublic)
 	assert.Equal(t, base64.RawURLEncoding.EncodeToString(sum[:7]), set.Keys[1].Kid)
-	published, err := set.Ed25519Keys()
-	require.NoError(t, err)
-	assert.Equal(t, activePublic, published[0])
 
 	// Requests are signed with the first key, so a receiver that trusts only that one verifies them
 	a, err := New(config.ConfigOutboundAuth{Type: config.OutboundAuthEd25519}, keys, time.Second)
@@ -132,7 +129,7 @@ func TestEd25519KeyIDs(t *testing.T) {
 	for _, value := range []string{pemKey, whsk, jwk} {
 		keys, err := LoadKeySet(config.ConfigSigningEd25519{Keys: []string{value}})
 		require.NoError(t, err)
-		ids = append(ids, keys.ActiveKeyID())
+		ids = append(ids, keys.public[0].Kid)
 	}
 	assert.Len(t, ids[0], 10)
 	assert.Equal(t, []string{ids[0], ids[0], ids[0]}, ids)

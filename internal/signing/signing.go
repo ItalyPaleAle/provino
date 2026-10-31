@@ -209,9 +209,8 @@ func (s *assertionTokenSource) Token() (*oauth2.Token, error) {
 
 // KeySet is the set of Ed25519 keys this service signs with and publishes
 type KeySet struct {
-	activeID string
-	active   ed25519.PrivateKey
-	public   []webhook.JWK
+	active ed25519.PrivateKey
+	public []webhook.JWK
 }
 
 // LoadKeySet reads the configured Ed25519 keys, returning nil when there are none
@@ -241,7 +240,6 @@ func LoadKeySet(cfg config.ConfigSigningEd25519) (*KeySet, error) {
 
 		// The first key signs, and every key is published, so receivers can trust a new key before it moves to the top and an old one until it's removed
 		if i == 0 {
-			ks.activeID = id
 			ks.active = private
 		}
 		ks.public = append(ks.public, webhook.NewEd25519JWK(id, public))
@@ -267,11 +265,6 @@ func keyID(value string, public ed25519.PublicKey) string {
 
 	sum := sha256.Sum256(public)
 	return base64.RawURLEncoding.EncodeToString(sum[:7])
-}
-
-// ActiveKeyID returns the ID of the key requests are signed with
-func (k *KeySet) ActiveKeyID() string {
-	return k.activeID
 }
 
 // JWKS returns the published key set, encoded as JSON

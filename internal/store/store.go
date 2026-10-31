@@ -41,10 +41,10 @@ var (
 
 // Store is the pair of backends the service uses: one for the images it receives, one for the variants it generates
 // They're separate because the two have different lifetimes and often different visibility: the variants are usually served to browsers, while the originals are not
+// The keys are the ones imagekeys builds whatever the DSNs selected, because applications address these objects in these same stores and the service can't pick a shape of its own
 type Store struct {
 	originals objstore.Backend
 	variants  objstore.Backend
-	keys      imagekeys.Layout
 }
 
 // NewOpts contains the options for New
@@ -67,11 +67,9 @@ func New(opts NewOpts) (*Store, error) {
 		return nil, fmt.Errorf("failed to create the storage backend for the variants: %w", err)
 	}
 
-	// The layout is the same whatever the DSNs selected, because applications address these objects in these same stores and the service can't pick a shape of its own
 	return &Store{
 		originals: originals,
 		variants:  variants,
-		keys:      imagekeys.New(),
 	}, nil
 }
 
@@ -87,22 +85,22 @@ func (s *Store) VariantsDescription() string {
 
 // OriginalKey returns the key of an image's source
 func (s *Store) OriginalKey(namespace string, imageID uuid.UUID, format string) string {
-	return s.keys.OriginalKey(namespace, imageID, format)
+	return imagekeys.OriginalKey(namespace, imageID, format)
 }
 
 // AssetKey returns the key of one generated variant, from the size it came out at and its file ID
 func (s *Store) AssetKey(namespace string, imageID uuid.UUID, width int, height int, fileID string, format variant.Format) string {
-	return s.keys.AssetKey(namespace, imageID, width, height, fileID, format)
+	return imagekeys.AssetKey(namespace, imageID, width, height, fileID, format)
 }
 
 // OwnsKey reports whether a key read back from durable state names an object of the image
 func (s *Store) OwnsKey(namespace string, imageID uuid.UUID, key string) bool {
-	return s.keys.OwnsKey(namespace, imageID, key)
+	return imagekeys.OwnsKey(namespace, imageID, key)
 }
 
 // ManifestKey returns the key of the manifest describing an image
 func (s *Store) ManifestKey(namespace string, imageID uuid.UUID) string {
-	return s.keys.ManifestKey(namespace, imageID)
+	return imagekeys.ManifestKey(namespace, imageID)
 }
 
 // SaveOriginal writes an image's source and returns the key it was written to

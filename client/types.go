@@ -18,7 +18,7 @@ type IngestMetadata struct {
 type UploadMetadata struct {
 	// Namespace the image is stored in
 	Namespace string `json:"namespace"`
-	// ID of the image, a canonical UUID that isn't in use yet: a v4, or a v7 for an image that already has one
+	// ID of the image, a canonical UUID that isn't in use yet
 	// If empty, provino mints one
 	ImageID string `json:"imageId,omitempty"`
 	// Variants to generate once the upload is stored, which can be none

@@ -350,7 +350,6 @@ func jobVariants(specs []variant.Spec) []actors.VariantSpec {
 	out := make([]actors.VariantSpec, len(specs))
 	for i, spec := range specs {
 		out[i] = actors.VariantSpec{
-			Index:      i,
 			Format:     spec.Format,
 			Quality:    spec.Quality,
 			Effort:     spec.EffortValue(),

@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -411,58 +410,4 @@ func NewEd25519JWK(kid string, key ed25519.PublicKey) JWK {
 		Use: "sig",
 		Alg: "EdDSA",
 	}
-}
-
-// Ed25519Keys returns the Ed25519 public keys in the set, ignoring keys of any other type
-func (s JWKS) Ed25519Keys() ([]ed25519.PublicKey, error) {
-	keys := make([]ed25519.PublicKey, 0, len(s.Keys))
-	for i, jwk := range s.Keys {
-		if jwk.Kty != "OKP" || jwk.Crv != "Ed25519" {
-			continue
-		}
-		raw, err := base64.RawURLEncoding.DecodeString(jwk.X)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("key %d is not a valid Ed25519 public key", i)
-		}
-		keys = append(keys, ed25519.PublicKey(raw))
-	}
-	return keys, nil
-}
-
-// FetchJWKS downloads a JWKS and returns the Ed25519 keys in it
-func FetchJWKS(ctx context.Context, client *http.Client, url string) ([]ed25519.PublicKey, error) {
-	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create the JWKS request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch the JWKS: %w", err)
-	}
-	defer res.Body.Close() //nolint:errcheck
-
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetching the JWKS returned %s", res.Status)
-	}
-
-	var set JWKS
-	err = json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&set)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode the JWKS: %w", err)
-	}
-
-	keys, err := set.Ed25519Keys()
-	if err != nil {
-		return nil, err
-	}
-	if len(keys) == 0 {
-		return nil, errors.New("the JWKS holds no Ed25519 keys")
-	}
-
-	return keys, nil
 }
