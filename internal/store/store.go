@@ -20,6 +20,7 @@ import (
 
 	"github.com/italypaleale/provino/imagekeys"
 	"github.com/italypaleale/provino/internal/sniff"
+	"github.com/italypaleale/provino/variant"
 )
 
 const (
@@ -89,9 +90,14 @@ func (s *Store) OriginalKey(namespace string, imageID uuid.UUID, format string) 
 	return s.keys.OriginalKey(namespace, imageID, format)
 }
 
-// AssetKey returns the key of one generated variant
-func (s *Store) AssetKey(namespace string, imageID uuid.UUID, width int, height int, format string) string {
-	return s.keys.AssetKey(namespace, imageID, width, height, format)
+// AssetKey returns the key of one generated variant, from the size it came out at and its file ID
+func (s *Store) AssetKey(namespace string, imageID uuid.UUID, width int, height int, fileID string, format variant.Format) string {
+	return s.keys.AssetKey(namespace, imageID, width, height, fileID, format)
+}
+
+// OwnsKey reports whether a key read back from durable state names an object of the image
+func (s *Store) OwnsKey(namespace string, imageID uuid.UUID, key string) bool {
+	return s.keys.OwnsKey(namespace, imageID, key)
 }
 
 // ManifestKey returns the key of the manifest describing an image
@@ -205,10 +211,8 @@ func (s *Store) RemoveOriginal(ctx context.Context, namespace string, imageID uu
 	return nil
 }
 
-// SaveVariant writes one generated variant of an image
-func (s *Store) SaveVariant(ctx context.Context, namespace string, imageID uuid.UUID, width int, height int, format string, data []byte, contentType string) error {
-	key := s.AssetKey(namespace, imageID, width, height, format)
-
+// SaveVariant writes one generated variant of an image at its key
+func (s *Store) SaveVariant(ctx context.Context, key string, data []byte, contentType string) error {
 	_, err := s.variants.Put(ctx, key, bytes.NewReader(data), int64(len(data)), contentType)
 	if err != nil {
 		return fmt.Errorf("failed to write the variant '%s': %w", key, err)
@@ -218,13 +222,12 @@ func (s *Store) SaveVariant(ctx context.Context, namespace string, imageID uuid.
 }
 
 // ReadVariant reads back one generated variant of an image
-func (s *Store) ReadVariant(ctx context.Context, namespace string, imageID uuid.UUID, width int, height int, format string) ([]byte, error) {
-	return s.read(ctx, s.AssetKey(namespace, imageID, width, height, format), false)
+func (s *Store) ReadVariant(ctx context.Context, key string) ([]byte, error) {
+	return s.read(ctx, key, false)
 }
 
-// VariantExists reports whether one generated variant is already stored
-func (s *Store) VariantExists(ctx context.Context, namespace string, imageID uuid.UUID, width int, height int, format string) (bool, error) {
-	key := s.AssetKey(namespace, imageID, width, height, format)
+// VariantExists reports whether a variant is stored at a key
+func (s *Store) VariantExists(ctx context.Context, key string) (bool, error) {
 	exists, err := s.variants.Exists(ctx, key)
 	if err != nil {
 		return false, fmt.Errorf("failed to look up the variant '%s': %w", key, err)
@@ -234,9 +237,7 @@ func (s *Store) VariantExists(ctx context.Context, namespace string, imageID uui
 
 // RemoveVariant deletes one generated variant
 // Compensation can call this repeatedly because every supported backend treats a missing object as a successful delete
-func (s *Store) RemoveVariant(ctx context.Context, namespace string, imageID uuid.UUID, width int, height int, format string) error {
-	key := s.AssetKey(namespace, imageID, width, height, format)
-
+func (s *Store) RemoveVariant(ctx context.Context, key string) error {
 	err := s.variants.Delete(ctx, key)
 	if err != nil {
 		return fmt.Errorf("failed to remove the variant '%s': %w", key, err)

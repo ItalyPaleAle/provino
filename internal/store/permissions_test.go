@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/provino/variant"
 )
 
 // Report the permissions of a file or folder
@@ -26,10 +28,10 @@ func TestLocalStoragePermissions(t *testing.T) {
 		s, err := New(NewOpts{OriginalsDSN: filepath.Join(dir, "originals"), VariantsDSN: "fs:" + filepath.Join(dir, "variants")})
 		require.NoError(t, err)
 
-		err = s.SaveVariant(t.Context(), testNamespace, testImageID, 100, 75, "webp", []byte("data"), "image/webp")
+		key := s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP)
+		err = s.SaveVariant(t.Context(), key, []byte("data"), "image/webp")
 		require.NoError(t, err)
 
-		key := s.AssetKey(testNamespace, testImageID, 100, 75, "webp")
 		assert.Equal(t, fs.FileMode(0o600), modeOf(t, storedPath(dir, "variants", key)))
 		assert.Equal(t, fs.FileMode(0o750), modeOf(t, filepath.Dir(storedPath(dir, "variants", key))))
 		assert.NotContains(t, s.VariantsDescription(), "permissions")
@@ -44,13 +46,14 @@ func TestLocalStoragePermissions(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, s.VariantsDescription(), "permissions 0644 for files and 0755 for folders")
 
-		err = s.SaveVariant(t.Context(), testNamespace, testImageID, 100, 75, "webp", []byte("data"), "image/webp")
+		key := s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP)
+		err = s.SaveVariant(t.Context(), key, []byte("data"), "image/webp")
 		require.NoError(t, err)
 		err = s.WriteManifest(t.Context(), testNamespace, testImageID, map[string]string{"version": "provino/v1"})
 		require.NoError(t, err)
 
 		// Every object, and every folder from the root down to it, gets the configured permissions
-		for _, key := range []string{s.AssetKey(testNamespace, testImageID, 100, 75, "webp"), s.ManifestKey(testNamespace, testImageID)} {
+		for _, key := range []string{key, s.ManifestKey(testNamespace, testImageID)} {
 			path := storedPath(dir, "variants", key)
 			assert.Equal(t, fs.FileMode(0o644), modeOf(t, path), key)
 			for folder := filepath.Dir(path); folder != filepath.Join(dir, "variants"); folder = filepath.Dir(folder) {

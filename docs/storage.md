@@ -28,16 +28,17 @@ Every object of an image is stored under its namespace and two folder levels tak
 | Object | Store | Key |
 | --- | --- | --- |
 | Original | originals | `<namespace>/<id[0:2]>/<id[2:4]>/<imageId>_orig.<ext>` |
-| Variant | variants | `<namespace>/<id[0:2]>/<id[2:4]>/<imageId>_<width>x<height>.<ext>` |
+| Variant | variants | `<namespace>/<id[0:2]>/<id[2:4]>/<imageId>_<width>x<height>_<fileId>.<ext>` |
 | Manifest | variants | `<namespace>/<id[0:2]>/<id[2:4]>/<imageId>_manifest.json` |
 
-For example, `default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp`.
+For example, `default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400_3f9a0c1e.webp`.
 
-- A variant's key is its actual size and format. Two variants of the same size and format are the same object, which is why a request can't ask for both with different encoder settings.
+- Read a variant's key from the manifest, since the file ID is random.
+- Every file a job encodes gets a new file ID, so a key is written once and its bytes never change: you can serve variants as immutable, and a job never writes over a file that a manifest or an application references.
 - The extension of an original is its detected format: `jpg`, `png`, `webp`, `avif`, `heic` or `heif`.
 - New image IDs are UUIDv4s, so their leading characters spread evenly across the ~65,000 folders.
 
-The layout isn't configurable. Applications that compute keys in Go can use the [`imagekeys`](../imagekeys) package, but most commonly you will just load the keys from the manifest.
+The layout isn't configurable. Variant keys come from the manifest, and applications that compute the keys of originals and manifests in Go can use the [`imagekeys`](../imagekeys) package.
 
 > While the manifest doesn't contain secrets, if you're starting a file server / CDN directly from the variants storage whenever possible you may want to block public access to `.json` files to prevent serving the manifest.
 
@@ -63,8 +64,7 @@ Each image has a manifest next to its variants, which is rewritten by every job 
   "completedAt": "2026-10-11T10:11:14Z",
   "variants": [
     {
-      "key": "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp",
-      "name": "1200x400.webp",
+      "key": "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400_3f9a0c1e.webp",
       "format": "webp",
       "quality": 80,
       "effort": 5,
@@ -96,7 +96,7 @@ No variant is larger than its original. A box the original can't fill gets the o
 - `contain`: the whole original
 - `cover`: the largest centered crop of the box's shape
 
-Every such box of one fit and format produces the same file, so only the tightest one stores it. The others are listed with `"skipped": true` and `skippedFor`, the box that holds the file, and they repeat that file's key, width, height and size. A reader that doesn't know about skipped entries sees a duplicate and drops it.
+Every such box of one fit, format and quality produces the same file, so only the tightest one stores it. The others are listed with `"skipped": true` and `skippedFor`, the box that holds the file, and they repeat that file's key, width, height and size. A reader that doesn't know about skipped entries sees a duplicate and drops it.
 
 | Original | Boxes (`contain`) | Files |
 | --- | --- | --- |
@@ -105,9 +105,11 @@ Every such box of one fit and format produces the same file, so only the tightes
 
 ### Changing an image's variants
 
-`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit and format are reused rather than encoded again, whatever encoder settings produced them. Re-sending the whole set is a no-op for the variants that are already there, and the manifest always lists the complete set.
+`POST /v1/client/optimize` takes every variant an image should have, including the ones it already has. Stored files that still match their box, fit, format and quality are reused rather than encoded again, whatever encoder effort produced them. Re-sending the whole set is a no-op for the variants that are already there, and the manifest always lists the complete set.
 
-Variants that drop out of the set stay in the store, because an application may still reference them. Removing objects is left to the operator.
+Changing a variant's quality encodes it again, into a file of its own. For example, changing a site from `quality: 80` to `quality: 60` takes effect the next time each image's set is sent.
+
+Variants that drop out of the set stay in the store, because an application may still reference them, and so do the files of a variant whose quality changed. A job that fails deletes the files it created, which are all new. Removing objects is left to the operator.
 
 ## Originals and IDs
 

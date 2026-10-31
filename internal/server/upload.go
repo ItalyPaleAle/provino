@@ -250,17 +250,14 @@ func (s *Server) storeUpload(ctx context.Context, part *multipart.Part, in uploa
 }
 
 // Read the uploaded image's size from the copy written while it streamed, and enforce the pixel limit
+// libvips reads the copy's header from the file, so the upload is never held in memory to be measured
 func (s *Server) measureUpload(ctx context.Context, tmp *os.File) (actors.JobSource, error) {
 	err := tmp.Close()
 	if err != nil {
 		return actors.JobSource{}, fmt.Errorf("failed to close the uploaded copy: %w", err)
 	}
-	data, err := os.ReadFile(tmp.Name())
-	if err != nil {
-		return actors.JobSource{}, fmt.Errorf("failed to read the uploaded copy: %w", err)
-	}
 
-	size, err := s.measurer.SourceSize(ctx, data)
+	size, err := s.measurer.SourceSize(ctx, tmp.Name())
 	if err != nil {
 		return actors.JobSource{}, errUnreadableImage.Clone(httpserver.WithInnerError(err))
 	}
@@ -287,7 +284,7 @@ func (s *Server) startUpload(ctx context.Context, in upload, source actors.JobSo
 		Variants:    jobVariants(in.variants),
 		Notify:      in.notify,
 		SubjectHash: in.subjectHash,
-		RequestedAt: time.Now(),
+		RequestedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		s.removeUpload(ctx, in, source.Format)
@@ -354,7 +351,6 @@ func jobVariants(specs []variant.Spec) []actors.VariantSpec {
 	for i, spec := range specs {
 		out[i] = actors.VariantSpec{
 			Index:      i,
-			Name:       spec.Name(),
 			Format:     spec.Format,
 			Quality:    spec.Quality,
 			Effort:     spec.EffortValue(),

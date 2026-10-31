@@ -7,12 +7,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/provino/variant"
 )
 
 var (
 	siteID    = uuid.MustParse("6ba7b810-9dad-41d1-80b4-00c04fd430c8")
 	namespace = siteID.String()
 	imageID   = uuid.MustParse("3480e342-5b8a-4ec8-9b0d-a0b26a751691")
+
+	fileID = "3f9a0c1e"
 )
 
 func TestLayout(t *testing.T) {
@@ -21,13 +25,13 @@ func TestLayout(t *testing.T) {
 	// The two folder levels come from the first four characters of the image ID
 	assert.Equal(t, namespace+"/34/80/", l.Prefix(namespace, imageID))
 	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_orig.png", l.OriginalKey(namespace, imageID, "PNG"))
-	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_1200x400.webp", l.AssetKey(namespace, imageID, 1200, 400, "webp"))
+	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_1200x400_3f9a0c1e.webp", l.AssetKey(namespace, imageID, 1200, 400, fileID, variant.FormatWebP))
 	assert.Equal(t, namespace+"/34/80/"+imageID.String()+"_manifest.json", l.ManifestKey(namespace, imageID))
 
 	// Every object of one image sits under the prefix, so listing or deleting it reaches all of them
 	for _, key := range []string{
 		l.OriginalKey(namespace, imageID, "png"),
-		l.AssetKey(namespace, imageID, 1200, 400, "webp"),
+		l.AssetKey(namespace, imageID, 1200, 400, fileID, variant.FormatWebP),
 		l.ManifestKey(namespace, imageID),
 	} {
 		assert.True(t, strings.HasPrefix(key, l.Prefix(namespace, imageID)), key)
@@ -40,8 +44,8 @@ func TestLayoutDoesNotVaryByBackend(t *testing.T) {
 	image := uuid.MustParse("50cefe14-49d3-4b54-bca6-3dfde5f3c1b8")
 
 	assert.Equal(t,
-		"4c16dfe3-cefe-4057-8b29-55f08ecfe204/50/ce/50cefe14-49d3-4b54-bca6-3dfde5f3c1b8_1536x2048.avif",
-		New().AssetKey(site.String(), image, 1536, 2048, "avif"),
+		"4c16dfe3-cefe-4057-8b29-55f08ecfe204/50/ce/50cefe14-49d3-4b54-bca6-3dfde5f3c1b8_1536x2048_3f9a0c1e.avif",
+		New().AssetKey(site.String(), image, 1536, 2048, fileID, variant.FormatAVIF),
 	)
 	assert.Equal(t,
 		"4c16dfe3-cefe-4057-8b29-55f08ecfe204/50/ce/50cefe14-49d3-4b54-bca6-3dfde5f3c1b8_orig.jpg",
@@ -72,14 +76,71 @@ func TestShardFansOut(t *testing.T) {
 	assert.Less(t, largest, n/50)
 }
 
-func TestAssetKeyIgnoresQuality(t *testing.T) {
+// A variant's key names the size the file came out at and its format, and ends with the file ID
+func TestAssetKey(t *testing.T) {
 	l := New()
+	key := func(width int, height int, format variant.Format) string {
+		name, found := strings.CutPrefix(l.AssetKey(namespace, imageID, width, height, fileID, format), l.Prefix(namespace, imageID)+imageID.String()+"_")
+		require.True(t, found)
+		return name
+	}
 
-	// One variant per size and format: two encodings of the same variant are the same object, whatever quality produced them
-	assert.Equal(t,
-		l.AssetKey(namespace, imageID, 1200, 400, "webp"),
-		l.AssetKey(namespace, imageID, 1200, 400, "WEBP"),
-	)
+	assert.Equal(t, "1200x400_3f9a0c1e.webp", key(1200, 400, variant.FormatWebP))
+	assert.Equal(t, "800x800_3f9a0c1e.avif", key(800, 800, variant.FormatAVIF))
+	assert.Equal(t, "600x244_3f9a0c1e.jpg", key(600, 244, variant.FormatJPEG))
+	assert.Equal(t, "600x244_3f9a0c1e.png", key(600, 244, variant.FormatPNG))
+}
+
+func TestFileID(t *testing.T) {
+	seen := make(map[string]struct{}, 100)
+	for range 100 {
+		id := NewFileID()
+		err := ValidateFileID(id)
+		require.NoError(t, err)
+		seen[id] = struct{}{}
+	}
+	assert.Len(t, seen, 100)
+
+	for _, id := range []string{"", "3f9a0c1", "3f9a0c1e0", "3F9A0C1E", "3f9a0c1g", "../../x", "3f9a/c1e"} {
+		err := ValidateFileID(id)
+		require.Error(t, err, id)
+	}
+
+	// The file ID is read back from the key, and a key an older layout named has none
+	l := New()
+	assert.Equal(t, fileID, FileIDOf(l.AssetKey(namespace, imageID, 1200, 400, fileID, variant.FormatWebP)))
+	assert.Empty(t, FileIDOf(l.Prefix(namespace, imageID)+imageID.String()+"_600x400.webp"))
+	assert.Empty(t, FileIDOf(l.ManifestKey(namespace, imageID)))
+	assert.Empty(t, FileIDOf(l.OriginalKey(namespace, imageID, "png")))
+	assert.Empty(t, FileIDOf(""))
+}
+
+func TestOwnsKey(t *testing.T) {
+	l := New()
+	other := uuid.NewV4()
+
+	// Every key the layout builds for the image belongs to it, as do the keys of an older layout that are stored under the same prefix
+	for _, key := range []string{
+		l.OriginalKey(namespace, imageID, "png"),
+		l.AssetKey(namespace, imageID, 1200, 400, fileID, variant.FormatWebP),
+		l.ManifestKey(namespace, imageID),
+		l.Prefix(namespace, imageID) + imageID.String() + "_600x400.webp",
+	} {
+		assert.True(t, l.OwnsKey(namespace, imageID, key), key)
+	}
+
+	for _, key := range []string{
+		"",
+		l.Prefix(namespace, imageID) + imageID.String() + "_",
+		l.AssetKey(namespace, other, 1200, 400, fileID, variant.FormatWebP),
+		l.AssetKey("other", imageID, 1200, 400, fileID, variant.FormatWebP),
+		l.Prefix(namespace, imageID) + other.String() + "_600x400.webp",
+		l.Prefix(namespace, imageID) + imageID.String() + "_x/../../" + other.String() + "_600x400.webp",
+		l.Prefix(namespace, imageID) + imageID.String() + "_..webp",
+		"/" + l.AssetKey(namespace, imageID, 1200, 400, fileID, variant.FormatWebP),
+	} {
+		assert.False(t, l.OwnsKey(namespace, imageID, key), key)
+	}
 }
 
 func TestValidateID(t *testing.T) {
@@ -125,7 +186,7 @@ func TestKeysStayInsideTheirPrefix(t *testing.T) {
 		site, image := uuid.NewV4(), uuid.NewV4()
 		for _, key := range []string{
 			l.OriginalKey(site.String(), image, "png"),
-			l.AssetKey(site.String(), image, 100, 100, "webp"),
+			l.AssetKey(site.String(), image, 100, 100, fileID, variant.FormatWebP),
 			l.ManifestKey(site.String(), image),
 		} {
 			assert.NotContains(t, key, "..")
@@ -136,12 +197,13 @@ func TestKeysStayInsideTheirPrefix(t *testing.T) {
 }
 
 // Keys written before namespaces replaced site IDs must not move, so these are pinned to the exact strings that layout produced
+// Variants are the exception: their names now end with a random file ID, and the variants stored under the older names are found through the keys their manifest records
 func TestLayoutIsUnchangedForUUIDNamespaces(t *testing.T) {
 	l := New()
 	image := uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
 
 	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_orig.jpg", l.OriginalKey(namespace, image, ".jpg"))
-	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_600x400.webp", l.AssetKey(namespace, image, 600, 400, "webp"))
+	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_1200x400_3f9a0c1e.webp", l.AssetKey(namespace, image, 1200, 400, fileID, variant.FormatWebP))
 	assert.Equal(t, "6ba7b810-9dad-41d1-80b4-00c04fd430c8/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_manifest.json", l.ManifestKey(namespace, image))
 }
 

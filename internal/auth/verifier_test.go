@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -296,7 +297,7 @@ func TestNewVerifierRejectsCrossOriginKeySetRedirect(t *testing.T) {
 }
 
 func TestParseIssuerResourceEnforcesTheIssuerOrigin(t *testing.T) {
-	issuer, err := parseIssuer("https://idp.example")
+	issuer, err := url.Parse("https://idp.example")
 	require.NoError(t, err)
 
 	tests := []struct {

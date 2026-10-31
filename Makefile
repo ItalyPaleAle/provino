@@ -15,6 +15,22 @@ test-race:
 test-workflows:
 	go test -tags unit ./internal/actors/...
 
+# Run the example app and provino together, as listed in example/Procfile, until Ctrl+C stops both
+.PHONY: example
+example:
+# goreman's RPC server, which restarts one server at a time, listens on loopback only rather than on every interface
+	pnpm --dir example/web install --frozen-lockfile
+	GOREMAN_RPC_ADDR=127.0.0.1 go tool goreman -f example/Procfile -set-ports=false -logtime=false start
+
+# Delete everything the example stored, so it starts over
+.PHONY: example-reset
+example-reset:
+	@if curl -s -o /dev/null http://localhost:3001/ || curl -s -o /dev/null http://127.0.0.1:3000/; then \
+		echo "The example is still running: stop it first"; \
+		exit 1; \
+	fi
+	rm -rf example/data
+
 .PHONY: lint
 lint:
 	golangci-lint run -c .golangci.yaml

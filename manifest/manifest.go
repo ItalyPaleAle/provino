@@ -51,7 +51,7 @@ type Manifest struct {
 	SourceWidth  int `json:"sourceWidth,omitempty"`
 	SourceHeight int `json:"sourceHeight,omitempty"`
 
-	// When the original was stored
+	// When the original was stored, in UTC like every time in the manifest
 	StoredAt time.Time `json:"storedAt,omitzero"`
 	// When the job that wrote this manifest was requested, started, and completed
 	RequestedAt time.Time `json:"requestedAt,omitzero"`
@@ -64,11 +64,9 @@ type Manifest struct {
 
 // Variant describes one variant in the manifest
 type Variant struct {
-	// Key of the file in the variants store
-	// A skipped entry repeats the key of the entry that holds its pixels
+	// Key of the file in the variants store, named after the image, the size the file came out at and a random file ID, so every file a job encodes is a new object whose bytes never change
+	// A skipped entry repeats the key of the entry that holds its pixels, and a reused one keeps the key the file was stored at, which can be a name from an older layout
 	Key string `json:"key"`
-	// Name the variant is listed under, unique within the manifest
-	Name string `json:"name"`
 	// Format the file is encoded in
 	Format variant.Format `json:"format"`
 	// Encoder settings the file was produced with
@@ -83,7 +81,7 @@ type Variant struct {
 	Height int `json:"height,omitempty"`
 	// Size of the file, in bytes
 	Size int64 `json:"size,omitempty"`
-	// Skipped marks a box the source can't fill whose pixels a tighter box of the same fit and format already holds, so no file was stored for it
+	// Skipped marks a box the source can't fill whose pixels a tighter box of the same fit, format and quality already holds, so no file was stored for it
 	// The entry repeats that file's key, width, height and size, so a reader that doesn't know about skipped entries sees a duplicate of that file and drops it
 	Skipped bool `json:"skipped,omitempty"`
 	// SkippedFor is the box whose entry holds the file, set on skipped entries only

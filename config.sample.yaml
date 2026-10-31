@@ -340,12 +340,6 @@ images:
   ##   If empty, defaults to the number of CPUs the process can use, which follows the CPU limit of a container.
   #maxConcurrentEncodes: 0
 
-  ## images.vipsCacheMaxMemory (number)
-  ## Description:
-  ##   Maximum amount of memory, in bytes, libvips uses for its operation cache
-  ## Default: 52428800 (50MB)
-  #vipsCacheMaxMemory: 52428800 (50MB)
-
 storage:
   ## storage.originals (string)
   ## Description:

@@ -26,7 +26,6 @@ func TestParse(t *testing.T) {
 			StoredAt:     time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC),
 			Variants: []Variant{{
 				Key:        "default/0b/8c/0b8cb0f7-2a1a-4f0f-9a9e-2b3a3f2f5f2a_600x400.webp",
-				Name:       "1200x400.webp",
 				Format:     variant.FormatWebP,
 				Quality:    80,
 				Effort:     5,

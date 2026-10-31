@@ -44,8 +44,6 @@ const (
 type VariantSpec struct {
 	// Position of the variant within the job, which identifies it in the fan-out
 	Index int `json:"index"`
-	// Name the variant is listed under in the manifest
-	Name string `json:"name"`
 	// Format the variant is encoded to
 	Format imaging.Format `json:"format"`
 	// Encoder quality, for lossy formats
@@ -118,37 +116,19 @@ type variantTask struct {
 	SourceFormat string `json:"sourceFormat"`
 	// The variant to generate
 	Spec VariantSpec `json:"spec"`
-	// Existing is the stored manifest entry reused instead of encoding this resolution and format again
+	// Existing is the stored manifest entry reused instead of encoding this variant again
 	Existing *manifest.Variant `json:"existing,omitempty"`
 	// Skip is set when the source can't fill this box and another variant of the job already holds the same pixels, so nothing is encoded
 	Skip *SkippedVariant `json:"skip,omitempty"`
+	// FileID is the random part of the key the encoded file is stored at, set on the variants that encode
+	// It's chosen when the job is planned, so a retried task writes the same key instead of leaving a file behind
+	FileID string `json:"fileId,omitempty"`
 	// SourceSize is the source's size after its EXIF orientation, which every item carries so the manifest can record it from durable outputs
 	SourceSize imaging.Resolution `json:"sourceSize,omitzero"`
-	// Reserved lists the stored files other variants of the job reuse, set on the items that encode
-	// An encode that comes out at the size and format of one of them must not replace it with different encoder settings, since the manifest describes the stored bytes
-	Reserved []reservedFile `json:"reserved,omitempty"`
-}
-
-// reservedFile is a stored file that a variant of the job reuses
-type reservedFile struct {
-	// Name of the variant that reuses the file
-	Name string `json:"name"`
-	// The file's entry in the manifest the job found
-	Stored manifest.Variant `json:"stored"`
-}
-
-// Find the reserved file an encode of the given size and format would be stored as
-func (t variantTask) reservedAt(width int, height int, format imaging.Format) (reservedFile, bool) {
-	for _, r := range t.Reserved {
-		if r.Stored.Width == width && r.Stored.Height == height && r.Stored.Format.Extension() == format.Extension() {
-			return r, true
-		}
-	}
-	return reservedFile{}, false
 }
 
 // SkippedVariant points a box the source can't fill at the variant of the same job that holds its pixels
-// Every box the source can't fill gets the source's own pixels, so for each fit and format only the tightest of them stores a file
+// Every box the source can't fill gets the source's own pixels, so for each fit, format and quality only the tightest of them stores a file
 type SkippedVariant struct {
 	// Position of the variant that holds the file
 	Index int `json:"index"`
@@ -161,8 +141,6 @@ type SkippedVariant struct {
 type VariantResult struct {
 	// Index of the variant within the job
 	Index int `json:"index"`
-	// Name of the variant
-	Name string `json:"name"`
 	// Size of the encoded variant, in bytes
 	Size int64 `json:"size,omitempty"`
 	// Actual width of the variant, which can be smaller than requested when fitting inside the requested box
@@ -173,6 +151,8 @@ type VariantResult struct {
 	DurationMs int64 `json:"durationMs,omitempty"`
 	// When the variant was completed
 	CompletedAt time.Time `json:"completedAt"`
+	// Key the encoded file was stored at, which no other file had, so a failed job deletes it
+	Key string `json:"key,omitempty"`
 	// Reused preserves the metadata of an existing stored object that was not regenerated
 	Reused *manifest.Variant `json:"reused,omitempty"`
 	// Skipped is set when nothing was encoded because another variant holds this box's pixels

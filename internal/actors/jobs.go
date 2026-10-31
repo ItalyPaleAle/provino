@@ -59,8 +59,16 @@ func (s *jobService) start(ctx context.Context, req JobRequest) error {
 	for i := range req.Variants {
 		req.Variants[i].Index = i
 	}
+	// The input is stored in UTC, like every time provino records
+	// A request the image actor kept in its state comes back from Francis in the local zone, so it's converted rather than trusted
 	if req.RequestedAt.IsZero() {
 		req.RequestedAt = time.Now()
+	}
+	req.RequestedAt = req.RequestedAt.UTC()
+	if req.Source != nil {
+		source := *req.Source
+		source.StoredAt = source.StoredAt.UTC()
+		req.Source = &source
 	}
 
 	_, created, err := s.workflow.Start(ctx, req,
@@ -69,7 +77,7 @@ func (s *jobService) start(ctx context.Context, req JobRequest) error {
 	if err != nil {
 		return fmt.Errorf("failed to start the workflow of job '%s': %w", req.JobID, err)
 	}
-	if created && s.runtime.Metrics != nil {
+	if created {
 		s.runtime.Metrics.RecordJobStarted(ctx, len(req.Variants))
 	}
 
@@ -191,10 +199,11 @@ func (h *hostJobs) Status(ctx context.Context, namespace string, imageID string,
 
 // Fill a job's status from its workflow's journal
 func applyInstanceStatus(status *JobStatus, instance francisworkflow.InstanceStatus) {
+	// Francis reports the journal's times in the local zone, and the status carries them in UTC
 	status.Status = StatusRunning
-	status.RequestedAt = instance.CreatedAt
-	status.StartedAt = instance.StartedAt
-	status.CompletedAt = instance.CompletedAt
+	status.RequestedAt = instance.CreatedAt.UTC()
+	status.StartedAt = instance.StartedAt.UTC()
+	status.CompletedAt = instance.CompletedAt.UTC()
 
 	for _, step := range instance.Steps {
 		if step.Name != stepGenerate {

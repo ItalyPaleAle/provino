@@ -103,7 +103,7 @@ The OpenAPI document is served at `/.openapi` and as `/.openapi/provino.json` an
 | `GET /healthz` | Health checks | Liveness: the process answers |
 | `GET /readyz` | Health checks | Readiness: the actor host is registered and jobs can run |
 
-Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job has started. The jobs of an image run one at a time, so a request for an image that has another job running gets `409 image_busy`, and can be sent again once that job has finished.
+Uploads and optimize requests answer `202 Accepted` with a job ID as soon as the job has started. The jobs of an image run one at a time, so a request for an image that has another job running gets `409 image_busy`, and can be sent again once that job has stored its manifest, without waiting for its webhook to be delivered.
 
 - An upload is `multipart/form-data`, with the `metadata` part before the `image` part, so provino can stream the image straight to the store.
 - A variant looks like `{"format": "webp", "quality": 80, "effort": 5, "size": {"width": 1200, "height": 400}, "fit": "contain"}`. Its format is `webp`, `avif`, `jpeg` or `png`, and its fit is `contain` (the default) or `cover`.

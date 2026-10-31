@@ -218,7 +218,7 @@ func (a *imageActor) Alarm(ctx context.Context, _ string, _ actor.Envelope) erro
 		return fmt.Errorf("failed to read the image's state: %w", err)
 	}
 
-	err = a.heal(ctx, &state)
+	_, err = a.heal(ctx, &state)
 	if err != nil {
 		return err
 	}
@@ -234,18 +234,21 @@ func (a *imageActor) startJob(ctx context.Context, req JobRequest) (startResult,
 	}
 
 	// An active job that ended without telling the actor would hold the image forever, so every start checks on it
-	err = a.heal(ctx, &state)
+	healed, err := a.heal(ctx, &state)
 	if err != nil {
 		return startResult{}, err
 	}
 
 	// Only one job of an image runs at a time, so a job sent while another is running is refused rather than kept, and the caller sends it again later
 	// An upload holding the ID is still storing the original, so the only job that may start is the upload's own, which carries what it learned about the original; any other would fail with image_not_found
+	// A refusal writes nothing unless heal changed the state, so a caller retrying against a busy image doesn't cost a write each time
 	uploading := state.Upload != nil && time.Now().Before(state.Upload.ExpiresAt)
 	if state.Active != nil || (uploading && req.Source == nil) {
-		err = a.save(ctx, &state)
-		if err != nil {
-			return startResult{}, err
+		if healed {
+			err = a.save(ctx, &state)
+			if err != nil {
+				return startResult{}, err
+			}
 		}
 		return startResult{Busy: true}, nil
 	}
@@ -283,15 +286,22 @@ func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, 
 	}
 
 	// An active job that ended without telling the actor would otherwise hold the ID forever
-	err = a.heal(ctx, &state)
+	healed, err := a.heal(ctx, &state)
 	if err != nil {
 		return claimResult{}, err
 	}
 
-	now := time.Now()
+	// A refusal writes nothing unless heal changed the state
+	now := time.Now().UTC()
 	heldByOther := state.Upload != nil && state.Upload.Token != req.Token && now.Before(state.Upload.ExpiresAt)
 	if heldByOther || state.Active != nil {
-		return claimResult{Claimed: false}, a.save(ctx, &state)
+		if healed {
+			err = a.save(ctx, &state)
+			if err != nil {
+				return claimResult{}, err
+			}
+		}
+		return claimResult{Claimed: false}, nil
 	}
 
 	state.Upload = &uploadClaim{Token: req.Token, ExpiresAt: now.Add(req.TTL)}
@@ -344,20 +354,25 @@ func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult
 }
 
 // Free the image when the active job's workflow has ended, and start the workflow when it never did
-func (a *imageActor) heal(ctx context.Context, state *imageState) error {
+// It reports whether it changed the state, which then has to be saved
+func (a *imageActor) heal(ctx context.Context, state *imageState) (bool, error) {
 	if state.Active == nil {
-		return nil
+		return false, nil
 	}
 
 	status, found, err := a.jobs.instanceStatus(ctx, a.namespace, a.imageID, state.Active.JobID)
 	if err != nil {
-		return fmt.Errorf("failed to check on the active job: %w", err)
+		return false, fmt.Errorf("failed to check on the active job: %w", err)
 	}
+	changed := false
 	if found {
 		// The workflow exists, so the request isn't needed to start it again
-		state.Active.Request = nil
+		if state.Active.Request != nil {
+			state.Active.Request = nil
+			changed = true
+		}
 		if !isTerminal(status) {
-			return nil
+			return changed, nil
 		}
 	}
 
@@ -368,11 +383,11 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) error {
 		if err != nil {
 			// The job stays active, and the next check tries again
 			a.runtime.Log.WarnContext(ctx, "Failed to start an active job whose workflow never started", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.String("jobId", state.Active.JobID), slog.Any("error", err))
-			return nil
+			return false, nil
 		}
 		a.runtime.Log.WarnContext(ctx, "Started an active job whose workflow never started", slog.String("namespace", a.namespace), slog.String("imageId", a.imageID), slog.String("jobId", state.Active.JobID))
 		state.Active.Request = nil
-		return nil
+		return true, nil
 	}
 
 	a.runtime.Log.WarnContext(ctx, "Freed an image whose active job ended without reporting back",
@@ -382,7 +397,7 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) error {
 		slog.Bool("found", found),
 	)
 	a.finishActive(state)
-	return nil
+	return true, nil
 }
 
 // Report whether the journal of an active job's workflow could have been purged by now
@@ -423,7 +438,7 @@ func (a *imageActor) activate(ctx context.Context, state *imageState, req JobReq
 		return fmt.Errorf("failed to schedule the image's check: %w", err)
 	}
 
-	state.Active = &activeJob{JobID: req.JobID, SubjectHash: req.SubjectHash, StartedAt: time.Now(), Request: &req, Retention: a.runtime.CompletedWorkflowRetention}
+	state.Active = &activeJob{JobID: req.JobID, SubjectHash: req.SubjectHash, StartedAt: time.Now().UTC(), Request: &req, Retention: a.runtime.CompletedWorkflowRetention}
 	err = a.client.SetState(ctx, *state, nil)
 	if err != nil {
 		state.Active = nil
@@ -469,7 +484,17 @@ func (a *imageActor) save(ctx context.Context, state *imageState) error {
 		return fmt.Errorf("failed to save the image's state: %w", err)
 	}
 
-	err = a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: a.nextCheck(state, now)})
+	// A history kept indefinitely has nothing that expires, so it gets no alarm, and the image's next job or upload claim prunes it if the retention changed since
+	due := a.nextCheck(state, now)
+	if due.IsZero() {
+		err = a.client.DeleteAlarm(ctx, alarmCheck)
+		if err != nil && !errors.Is(err, actor.ErrAlarmNotFound) {
+			return fmt.Errorf("failed to delete the alarm: %w", err)
+		}
+		return nil
+	}
+
+	err = a.client.SetAlarm(ctx, alarmCheck, actor.AlarmProperties{DueTime: due})
 	if err != nil {
 		return fmt.Errorf("failed to schedule the image's check: %w", err)
 	}
@@ -477,7 +502,7 @@ func (a *imageActor) save(ctx context.Context, state *imageState) error {
 	return nil
 }
 
-// Work out when the actor next needs to look at its image
+// Work out when the actor next needs to look at its image, or zero when nothing is due
 func (a *imageActor) nextCheck(state *imageState, now time.Time) time.Time {
 	var due time.Time
 	consider := func(t time.Time) {
@@ -500,10 +525,6 @@ func (a *imageActor) nextCheck(state *imageState, now time.Time) time.Time {
 		consider(state.Upload.ExpiresAt)
 	}
 
-	// Nothing above applies to a history kept indefinitely, which still gets an occasional look
-	if due.IsZero() {
-		due = now.Add(24 * time.Hour)
-	}
 	return due
 }
 

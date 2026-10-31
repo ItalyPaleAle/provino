@@ -58,11 +58,11 @@ type Verifier struct {
 
 // NewVerifier locates the issuer's key set, fetches it before startup completes, and keeps it refreshed
 func NewVerifier(ctx context.Context, client *http.Client, opts VerifierOptions) (*Verifier, error) {
-	// Validate the trust boundary before creating a background cache
-	issuer := strings.TrimSpace(opts.Issuer)
-	issuerURL, err := parseIssuer(issuer)
+	// The configuration already checked the issuer is an absolute HTTP URL, and it's parsed here because a discovered key set is held to its origin
+	issuer := opts.Issuer
+	issuerURL, err := url.Parse(issuer)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("the issuer is not a valid URL: %w", err)
 	}
 	if opts.Audience == "" {
 		return nil, errors.New("the audience is empty")
@@ -337,24 +337,6 @@ func fetchJSON(ctx context.Context, client *http.Client, url string, dest any) e
 	}
 
 	return nil
-}
-
-// Parse the configured issuer, whose origin is the only one discovery is allowed to contact
-// The issuer may have a path, as it does for providers that host several tenants or realms on one origin
-func parseIssuer(raw string) (*url.URL, error) {
-	if raw == "" {
-		return nil, errors.New("the issuer is empty")
-	}
-
-	issuer, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("the issuer is not a valid URL: %w", err)
-	}
-	if !issuer.IsAbs() || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Hostname() == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
-		return nil, errors.New("the issuer must be an absolute HTTP URL without a query or fragment")
-	}
-
-	return issuer, nil
 }
 
 // Parse a discovered resource without allowing metadata to expand the configured network boundary

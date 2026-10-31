@@ -11,11 +11,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/provino/variant"
 )
 
 var (
 	testNamespace = "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
 	testImageID   = uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
+	testFileID    = "3f9a0c1e"
 )
 
 // The folder levels a local backend adds, which are the leading characters of the image ID
@@ -63,7 +66,7 @@ func TestKeys(t *testing.T) {
 
 	assert.Equal(t, prefix+testImageID.String()+"_orig.jpg", s.OriginalKey(testNamespace, testImageID, ".JPG"))
 	assert.Equal(t, prefix+testImageID.String()+"_orig.jpg", s.OriginalKey(testNamespace, testImageID, "jpg"))
-	assert.Equal(t, prefix+testImageID.String()+"_200x200.webp", s.AssetKey(testNamespace, testImageID, 200, 200, "webp"))
+	assert.Equal(t, prefix+testImageID.String()+"_200x150_3f9a0c1e.webp", s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP))
 	assert.Equal(t, prefix+testImageID.String()+"_manifest.json", s.ManifestKey(testNamespace, testImageID))
 
 	// The layout does not vary by backend, so a remote store addresses the very same key as the local one
@@ -73,7 +76,7 @@ func TestKeys(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, s.OriginalKey(testNamespace, testImageID, ".jpg"), remote.OriginalKey(testNamespace, testImageID, ".jpg"))
-	assert.Equal(t, s.AssetKey(testNamespace, testImageID, 200, 200, "webp"), remote.AssetKey(testNamespace, testImageID, 200, 200, "webp"))
+	assert.Equal(t, s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP), remote.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP))
 }
 
 func TestSaveOriginal(t *testing.T) {
@@ -217,18 +220,19 @@ func TestRemoveOriginal(t *testing.T) {
 func TestSaveVariant(t *testing.T) {
 	t.Run("writes the variant", func(t *testing.T) {
 		s, dir := newTestStore(t)
+		key := s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP)
 
-		err := s.SaveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp", []byte("variant"), "image/webp")
+		err := s.SaveVariant(t.Context(), key, []byte("variant"), "image/webp")
 		require.NoError(t, err)
 
-		content, err := os.ReadFile(storedPath(dir, "variants", s.AssetKey(testNamespace, testImageID, 200, 200, "webp"))) //nolint:gosec // The path is inside a temporary folder this test created
+		content, err := os.ReadFile(storedPath(dir, "variants", key)) //nolint:gosec // The path is inside a temporary folder this test created
 		require.NoError(t, err)
 		assert.Equal(t, "variant", string(content))
 
-		exists, err := s.VariantExists(t.Context(), testNamespace, testImageID, 200, 200, "webp")
+		exists, err := s.VariantExists(t.Context(), key)
 		require.NoError(t, err)
 		assert.True(t, exists)
-		exists, err = s.VariantExists(t.Context(), testNamespace, testImageID, 400, 400, "avif")
+		exists, err = s.VariantExists(t.Context(), s.AssetKey(testNamespace, testImageID, 200, 150, "0000beef", variant.FormatWebP))
 		require.NoError(t, err)
 		assert.False(t, exists)
 	})
@@ -236,28 +240,30 @@ func TestSaveVariant(t *testing.T) {
 	// A retried job regenerates the same variant, so writing it twice must be allowed
 	t.Run("overwrites a variant that exists already", func(t *testing.T) {
 		s, _ := newTestStore(t)
+		key := s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP)
 
-		err := s.SaveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp", []byte("first"), "image/webp")
+		err := s.SaveVariant(t.Context(), key, []byte("first"), "image/webp")
 		require.NoError(t, err)
-		err = s.SaveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp", []byte("second"), "image/webp")
+		err = s.SaveVariant(t.Context(), key, []byte("second"), "image/webp")
 		require.NoError(t, err)
 
-		data, err := s.ReadVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp")
+		data, err := s.ReadVariant(t.Context(), key)
 		require.NoError(t, err)
 		assert.Equal(t, "second", string(data))
 	})
 
 	t.Run("removes a variant idempotently", func(t *testing.T) {
 		s, _ := newTestStore(t)
+		key := s.AssetKey(testNamespace, testImageID, 200, 150, testFileID, variant.FormatWebP)
 
-		err := s.SaveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp", []byte("variant"), "image/webp")
+		err := s.SaveVariant(t.Context(), key, []byte("variant"), "image/webp")
 		require.NoError(t, err)
-		err = s.RemoveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp")
+		err = s.RemoveVariant(t.Context(), key)
 		require.NoError(t, err)
-		err = s.RemoveVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp")
+		err = s.RemoveVariant(t.Context(), key)
 		require.NoError(t, err)
 
-		_, err = s.ReadVariant(t.Context(), testNamespace, testImageID, 200, 200, "webp")
+		_, err = s.ReadVariant(t.Context(), key)
 		require.ErrorIs(t, err, ErrNotFound)
 	})
 }

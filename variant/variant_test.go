@@ -151,12 +151,6 @@ func TestSpecNormalize(t *testing.T) {
 	}
 }
 
-func TestSpecName(t *testing.T) {
-	assert.Equal(t, "1200x400.webp", Spec{Format: FormatWebP, Size: Resolution{Width: 1200, Height: 400}}.Name())
-	assert.Equal(t, "500x500-cover.jpg", Spec{Format: FormatJPEG, Size: Resolution{Width: 500, Height: 500}, Fit: FitCover}.Name())
-	assert.Equal(t, "800xauto.png", Spec{Format: FormatPNG, Size: Resolution{Width: 800}}.Name())
-}
-
 func TestNormalizeSet(t *testing.T) {
 	webp := Spec{Format: FormatWebP, Quality: 80, Size: Resolution{Width: 100, Height: 100}}
 
@@ -174,9 +168,19 @@ func TestNormalizeSet(t *testing.T) {
 		require.Len(t, got, 2)
 	})
 
-	t.Run("refuses conflicting encoder settings", func(t *testing.T) {
+	// Every quality is a file of its own, so one box can be asked for at several
+	t.Run("keeps one box at several qualities", func(t *testing.T) {
 		other := webp
 		other.Quality = 60
+		got, err := NormalizeSet([]Spec{webp, other}, 8192, 10)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+	})
+
+	// The effort doesn't change the picture, so two specs that differ only by it would be served by one file
+	t.Run("refuses specs that differ only by their effort", func(t *testing.T) {
+		other := webp
+		other.Effort = new(2)
 		_, err := NormalizeSet([]Spec{webp, other}, 8192, 10)
 		require.ErrorContains(t, err, "conflicts")
 	})

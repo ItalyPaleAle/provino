@@ -34,9 +34,9 @@ import (
 	"github.com/italypaleale/provino/internal/store"
 )
 
-// SourceMeasurer reads the size of an image the way its variants see it, after its EXIF orientation
+// SourceMeasurer reads the size of an image file the way its variants see it, after its EXIF orientation
 type SourceMeasurer interface {
-	SourceSize(ctx context.Context, source []byte) (imaging.Resolution, error)
+	SourceSize(ctx context.Context, source string) (imaging.Resolution, error)
 }
 
 // Server is the API server

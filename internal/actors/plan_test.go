@@ -83,6 +83,16 @@ func TestPlanSkips(t *testing.T) {
 		assert.Equal(t, []*SkippedVariant{nil, nil, nil}, skips)
 	})
 
+	t.Run("qualities never share a file", func(t *testing.T) {
+		low := planSpec(imaging.FormatWebP, 2000, 2000, imaging.FitContain)
+		low.Quality = 40
+		skips := planSkips(imaging.Resolution{Width: 800, Height: 800}, []VariantSpec{
+			planSpec(imaging.FormatWebP, 1000, 1000, imaging.FitContain),
+			low,
+		})
+		assert.Equal(t, []*SkippedVariant{nil, nil}, skips)
+	})
+
 	t.Run("an empty fit reads as contain", func(t *testing.T) {
 		skips := planSkips(imaging.Resolution{Width: 800, Height: 800}, []VariantSpec{
 			planSpec(imaging.FormatWebP, 1000, 1000, imaging.FitContain),
@@ -111,13 +121,14 @@ func TestPlanSkips(t *testing.T) {
 func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	imageID := uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
 	req := JobRequest{JobID: uuid.NewV7().String(), Namespace: "default", ImageID: imageID.String(), Variants: []VariantSpec{
-		{Name: "1000x1000.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain},
-		{Name: "2000x2000.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 2000, Height: 2000}, Fit: imaging.FitContain},
+		{Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain},
+		{Format: imaging.FormatWebP, Quality: 80, Effort: 5, Resolution: imaging.Resolution{Width: 2000, Height: 2000}, Fit: imaging.FitContain},
 	}}
+	holderKey := "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_800x800_3f9a0c1e.webp"
 	now := time.Now()
 	snap := jobSnapshot{SourceFormat: "png", SourceSize: 999, StartedAt: now}
 	results := []VariantResult{
-		{Index: 0, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
+		{Index: 0, Key: holderKey, Width: 800, Height: 800, Size: 1234, CompletedAt: now},
 		{Index: 1, CompletedAt: now, Skipped: &SkippedVariant{Index: 0, For: imaging.Resolution{Width: 1000, Height: 1000}}},
 	}
 
@@ -132,17 +143,16 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 	assert.Equal(t, "png", m.SourceFormat)
 	assert.Equal(t, "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_orig.png", m.SourceKey)
 
+	// An encoded variant is listed at the key it was stored at
 	holder := m.Variants[0]
 	assert.False(t, holder.Skipped)
 	assert.Nil(t, holder.SkippedFor)
-	assert.Equal(t, "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_800x800.webp", holder.Key)
+	assert.Equal(t, holderKey, holder.Key)
 
 	// The skipped entry repeats the holder's file, key included, so a reader that ignores skipped sees a duplicate it drops
 	skipped := m.Variants[1]
 	assert.True(t, skipped.Skipped)
-	assert.Equal(t, holder.Key, skipped.Key)
 	assert.Equal(t, &imaging.Resolution{Width: 1000, Height: 1000}, skipped.SkippedFor)
-	assert.Equal(t, "2000x2000.webp", skipped.Name)
 	assert.Equal(t, imaging.Resolution{Width: 2000, Height: 2000}, skipped.Resolution)
 	assert.Equal(t, holder.Key, skipped.Key)
 	assert.Equal(t, holder.Width, skipped.Width)
@@ -158,23 +168,24 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})
 
-	t.Run("variants that come out as one file with different settings are rejected", func(t *testing.T) {
-		shared := req
-		shared.Variants = []VariantSpec{
-			{Name: "600x600.webp", Format: imaging.FormatWebP, Quality: 90, Effort: 5, Resolution: imaging.Resolution{Width: 600, Height: 600}, Fit: imaging.FitContain},
-			{Name: "600xauto.webp", Format: imaging.FormatWebP, Quality: 20, Effort: 5, Resolution: imaging.Resolution{Width: 600}, Fit: imaging.FitContain},
-		}
-		conflicting := []VariantResult{
-			{Index: 0, Width: 600, Height: 400, Size: 3000, CompletedAt: now},
-			{Index: 1, Width: 600, Height: 400, Size: 1000, CompletedAt: now},
-		}
-		_, err := buildManifest(imagekeys.New(), shared, snap, imaging.Resolution{Width: 1500, Height: 1000}, conflicting)
-		require.ErrorContains(t, err, "both come out as the 600x400.webp file")
+	t.Run("an encoded variant without a key is rejected", func(t *testing.T) {
+		broken := []VariantResult{{Index: 0, Width: 800, Height: 800, Size: 1234}, results[1]}
+		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
+		require.ErrorContains(t, err, "records no key")
+	})
 
-		// The same file with the same settings is one variant listed twice, which is fine
-		shared.Variants[1].Quality = 90
-		_, err = buildManifest(imagekeys.New(), shared, snap, imaging.Resolution{Width: 1500, Height: 1000}, conflicting)
+	// A reused file keeps the key it's stored at, which may be a name an older layout gave it
+	t.Run("a reused variant keeps its stored key", func(t *testing.T) {
+		stored := manifest.Variant{Key: "default/01/a0/01a061a9-7384-4e97-aadf-232d1e006b83_800x800.webp", Format: imaging.FormatWebP, Quality: 80, Effort: 4, Resolution: imaging.Resolution{Width: 1000, Height: 1000}, Fit: imaging.FitContain, Width: 800, Height: 800, Size: 1234}
+		reused := []VariantResult{
+			{Index: 0, Width: 800, Height: 800, Size: 1234, CompletedAt: now, Reused: &stored},
+			results[1],
+		}
+		m, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{Width: 800, Height: 800}, reused)
 		require.NoError(t, err)
+		assert.Equal(t, stored.Key, m.Variants[0].Key)
+		assert.Equal(t, 4, m.Variants[0].Effort)
+		assert.Equal(t, stored.Key, m.Variants[1].Key)
 	})
 
 	t.Run("a skip pointing outside the job is rejected", func(t *testing.T) {
@@ -182,4 +193,37 @@ func TestBuildManifestRecordsSkippedVariants(t *testing.T) {
 		_, err := buildManifest(imagekeys.New(), req, snap, imaging.Resolution{}, broken)
 		require.ErrorContains(t, err, "doesn't hold a file")
 	})
+}
+
+func TestAssignFileIDs(t *testing.T) {
+	imageID := uuid.MustParse("01a061a9-7384-4e97-aadf-232d1e006b83")
+	existing := manifest.Variant{Key: imagekeys.New().AssetKey("default", imageID, 800, 600, "00000002", imaging.FormatWebP)}
+	previous := &manifest.Manifest{Variants: []manifest.Variant{
+		existing,
+		// A name an older layout gave a file has no file ID to avoid
+		{Key: imagekeys.New().Prefix("default", imageID) + imageID.String() + "_400x300.webp"},
+	}}
+	tasks := []variantTask{
+		{},
+		{Existing: &existing},
+		{Skip: &SkippedVariant{Index: 0}},
+		{},
+		{},
+	}
+
+	// The generator hands out an ID the previous manifest lists, and then one the job already gave out, and both are drawn again
+	ids := []string{"00000001", "00000002", "00000003", "00000001", "00000003", "00000004"}
+	next := 0
+	assignFileIDs(tasks, previous, func() string {
+		id := ids[next]
+		next++
+		return id
+	})
+
+	assert.Equal(t, "00000001", tasks[0].FileID)
+	assert.Empty(t, tasks[1].FileID, "a reused variant stores nothing")
+	assert.Empty(t, tasks[2].FileID, "a skipped variant stores nothing")
+	assert.Equal(t, "00000003", tasks[3].FileID)
+	assert.Equal(t, "00000004", tasks[4].FileID)
+	assert.Equal(t, len(ids), next)
 }

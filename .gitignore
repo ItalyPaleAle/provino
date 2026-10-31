@@ -3,6 +3,9 @@
 /config.*.yaml
 !/config.sample.yaml
 /data/
+/example/data/
+/example/web/node_modules/
+/example/web/dist/app/
 
 # Created by https://www.toptal.com/developers/gitignore/api/linux,macos,windows,visualstudiocode,go
 # Edit at https://www.toptal.com/developers/gitignore?templates=linux,macos,windows,visualstudiocode,go

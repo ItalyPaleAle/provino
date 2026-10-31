@@ -413,10 +413,6 @@ type ConfigImages struct {
 	// Each encode takes up to about 1 GB of memory for a source of 50 megapixels (the default "images.maxSourcePixels"), and that scales with the pixel count, so the memory available should be at least this many times that.
 	// If empty, defaults to the number of CPUs the process can use, which follows the CPU limit of a container.
 	MaxConcurrentEncodes int `yaml:"maxConcurrentEncodes"`
-
-	// Maximum amount of memory, in bytes, libvips uses for its operation cache
-	// +default 52428800 (50MB)
-	VipsCacheMaxMemory int `yaml:"vipsCacheMaxMemory"`
 }
 
 // ConfigStorage configures where the source images and the generated variants are stored
@@ -811,9 +807,10 @@ func (c *Config) validateAuth(logger *slog.Logger) error {
 func (c *Config) validateJWT() error {
 	jwt := &c.Auth.JWT
 
+	// This is the only check of the issuer: the verifier trusts it as configured, and holds a discovered key set to its origin
 	issuer, err := url.Parse(strings.TrimSpace(jwt.Issuer))
-	if err != nil || !issuer.IsAbs() || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Host == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
-		return errors.New("configuration option 'auth.jwt.issuer' must be an absolute HTTP URL")
+	if err != nil || !issuer.IsAbs() || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Hostname() == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
+		return errors.New("configuration option 'auth.jwt.issuer' must be an absolute HTTP URL without credentials, a query or a fragment")
 	}
 	jwt.Issuer = strings.TrimSpace(jwt.Issuer)
 
@@ -1245,9 +1242,6 @@ func (c *Config) validateImages() error {
 	}
 	if c.Images.MaxConcurrentEncodes < 0 {
 		return errors.New("configuration option 'images.maxConcurrentEncodes' must not be negative")
-	}
-	if c.Images.VipsCacheMaxMemory < 0 {
-		return errors.New("configuration option 'images.vipsCacheMaxMemory' must not be negative")
 	}
 
 	return nil

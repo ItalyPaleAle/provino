@@ -2,6 +2,8 @@ package imaging
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/davidbyttow/govips/v2/vips"
@@ -9,8 +11,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Write a source file the way the source cache does, with a name that says nothing about its format, and return its path
+func testSourceFile(t *testing.T, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "source.orig")
+	err := os.WriteFile(path, data, 0o600)
+	require.NoError(t, err)
+	return path
+}
+
 // Generate a PNG to use as the source image of the tests, sized so variants are always a downscale
-func testImage(t *testing.T, width int, height int) []byte {
+func testImage(t *testing.T, width int, height int) string {
 	t.Helper()
 
 	img, err := vips.Black(width, height)
@@ -20,7 +32,7 @@ func testImage(t *testing.T, width int, height int) []byte {
 	buf, _, err := img.ExportPng(vips.NewPngExportParams())
 	require.NoError(t, err)
 
-	return buf
+	return testSourceFile(t, buf)
 }
 
 func newTestEncoder(t *testing.T) *Encoder {
@@ -106,7 +118,7 @@ func TestEncoderGenerate(t *testing.T) {
 }
 
 // Encode a JPEG whose pixels are stored at one size and whose EXIF orientation turns them by a quarter
-func testRotatedJPEG(t *testing.T, storedWidth int, storedHeight int) []byte {
+func testRotatedJPEG(t *testing.T, storedWidth int, storedHeight int) string {
 	t.Helper()
 
 	img, err := vips.Black(storedWidth, storedHeight)
@@ -122,7 +134,7 @@ func testRotatedJPEG(t *testing.T, storedWidth int, storedHeight int) []byte {
 	buf, _, err := img.ExportJpeg(params)
 	require.NoError(t, err)
 
-	return buf
+	return testSourceFile(t, buf)
 }
 
 // A box the source can't fill gets the source's own pixels, so no variant is ever larger than its source
@@ -133,7 +145,7 @@ func TestEncoderGenerateNeverEnlarges(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		source     []byte
+		source     string
 		resolution Resolution
 		fit        Fit
 		wantWidth  int
@@ -229,12 +241,17 @@ func TestEncoderSourceSize(t *testing.T) {
 	})
 
 	t.Run("empty source", func(t *testing.T) {
-		_, err := encoder.SourceSize(t.Context(), nil)
+		_, err := encoder.SourceSize(t.Context(), "")
 		require.ErrorIs(t, err, ErrInvalidRequest)
 	})
 
 	t.Run("unreadable source", func(t *testing.T) {
-		_, err := encoder.SourceSize(t.Context(), []byte("hello world, this is not an image"))
+		_, err := encoder.SourceSize(t.Context(), testSourceFile(t, []byte("hello world, this is not an image")))
+		require.ErrorIs(t, err, ErrSourceUnreadable)
+	})
+
+	t.Run("missing source", func(t *testing.T) {
+		_, err := encoder.SourceSize(t.Context(), filepath.Join(t.TempDir(), "missing.orig"))
 		require.ErrorIs(t, err, ErrSourceUnreadable)
 	})
 }
@@ -357,7 +374,7 @@ func TestEncoderGenerateErrors(t *testing.T) {
 
 	t.Run("unreadable source is not retryable", func(t *testing.T) {
 		_, err := encoder.Generate(t.Context(), Request{
-			Source:     []byte("hello world"),
+			Source:     testSourceFile(t, []byte("hello world")),
 			Format:     FormatWebP,
 			Quality:    80,
 			Resolution: Resolution{Width: 100, Height: 100},

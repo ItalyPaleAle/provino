@@ -225,7 +225,7 @@ func (s *Server) RouteOptimize(w http.ResponseWriter, r *http.Request) {
 		SourceFormat: sourceFormat,
 		Variants:     jobVariants(variants),
 		Notify:       notification,
-		RequestedAt:  time.Now(),
+		RequestedAt:  time.Now().UTC(),
 	})
 	switch {
 	case errors.Is(err, actors.ErrImageBusy):

@@ -23,7 +23,7 @@ var (
 
 // Bound used for the axis of a resolution that was left unconstrained
 // libvips picks the scale factor from whichever axis binds first, so a very large bound on one axis makes the other one decide the size
-const unconstrainedDimension = 1 << 20 // 1MB
+const unconstrainedDimension = 1 << 20
 
 // Number of threads libvips uses within a single operation
 //
@@ -35,8 +35,6 @@ var startupOnce sync.Once
 
 // Options contains the process-wide settings for libvips
 type Options struct {
-	// Maximum amount of memory, in bytes, for the libvips operation cache
-	CacheMaxMemory int
 	// Logger that receives the libvips diagnostic messages
 	Logger *slog.Logger
 }
@@ -56,9 +54,12 @@ func Startup(ctx context.Context, opts Options) error {
 			logger.Log(ctx, vipsLogLevel(level), msg, slog.String("domain", domain))
 		}, vips.LogLevelWarning)
 
+		// The operation cache is off, because nothing is repeated: every variant is a new thumbnail of its source, so a cache would only hold memory
+		// It also means a source loaded by its path is always read again, never served from a cache of an earlier file at that path
 		err = vips.Startup(&vips.Config{
 			ConcurrencyLevel: vipsConcurrency,
-			MaxCacheMem:      opts.CacheMaxMemory,
+			MaxCacheSize:     0,
+			MaxCacheMem:      0,
 		})
 	})
 	if err != nil {
@@ -80,9 +81,9 @@ func NewEncoder() *Encoder {
 
 // Request describes a single variant to generate
 type Request struct {
-	// Source image to generate the variant from
-	// It's passed as a buffer rather than as a path because the source is stored in an object store, which may not be a local disk
-	Source []byte
+	// Path of the source image to generate the variant from, which is always a local file: the upload's own copy, or the source cache's
+	// libvips reads it directly, so the source never has to sit in the Go heap next to its decoded pixels
+	Source string
 	// Format the variant is encoded to
 	Format Format
 	// Quality for lossy formats, between 1 and 100; ignored by the formats that are lossless
@@ -138,7 +139,7 @@ func (e *Encoder) Generate(ctx context.Context, req Request) (Result, error) {
 	// libvips shrinks the image while decoding it, so this never materializes the full-size image when the source is much larger than the variant
 	// Shrinking only is what keeps a variant from ever being larger than its source: a contain box the source fits in keeps the source's own size
 	width, height, crop := req.thumbnailParams()
-	img, err := vips.NewThumbnailWithSizeFromBuffer(req.Source, width, height, crop, vips.SizeDown)
+	img, err := vips.NewThumbnailWithSizeFromFile(req.Source, width, height, crop, vips.SizeDown)
 	if err != nil {
 		// The source image never changes once it's uploaded, so a load failure is permanent rather than something to retry
 		return Result{}, fmt.Errorf("failed to generate variant: %w", errors.Join(ErrSourceUnreadable, err))
@@ -159,8 +160,8 @@ func (e *Encoder) Generate(ctx context.Context, req Request) (Result, error) {
 }
 
 // SourceSize returns the size of a source image the way its variants see it, after its EXIF orientation is applied
-func (e *Encoder) SourceSize(ctx context.Context, source []byte) (Resolution, error) {
-	if len(source) == 0 {
+func (e *Encoder) SourceSize(ctx context.Context, source string) (Resolution, error) {
+	if source == "" {
 		return Resolution{}, fmt.Errorf("%w: source image is empty", ErrInvalidRequest)
 	}
 	err := ctx.Err()
@@ -169,34 +170,16 @@ func (e *Encoder) SourceSize(ctx context.Context, source []byte) (Resolution, er
 		return Resolution{}, err
 	}
 
-	// Loading reads only the header, because libvips decodes the pixels when something first needs them
-	// Failing on warnings is turned off to match the thumbnail operation, which tolerates the same minor damage
-	params := vips.NewImportParams()
-	params.FailOnError.Set(false)
-	img, err := vips.LoadImageFromBuffer(source, params)
-	if err == nil {
-		defer img.Close()
-		return orientedSize(img.Width(), img.Height(), img.Orientation()), nil
-	}
-
-	// govips recognizes formats by their leading bytes and misses some files libvips itself reads, such as HEIF files with less common brands
-	// Measuring through the thumbnail operation recognizes exactly what the encoder does, at the cost of decoding the image
-	probe, probeErr := vips.NewThumbnailWithSizeFromBuffer(source, unconstrainedDimension, unconstrainedDimension, vips.InterestingNone, vips.SizeDown)
-	if probeErr != nil {
-		return Resolution{}, fmt.Errorf("failed to read the size of the source image: %w", errors.Join(ErrSourceUnreadable, err, probeErr))
+	// The thumbnail operation recognizes exactly the files the encoder does, and it applies the orientation the way the variants do
+	// It's lazy, so a thumbnail that's never exported decodes no pixels, and nothing is decoded before the size is checked against the pixel limit
+	// govips' plain file loader is no use here, since it reads the whole file into memory first
+	probe, err := vips.NewThumbnailWithSizeFromFile(source, unconstrainedDimension, unconstrainedDimension, vips.InterestingNone, vips.SizeDown)
+	if err != nil {
+		return Resolution{}, fmt.Errorf("failed to read the size of the source image: %w", errors.Join(ErrSourceUnreadable, err))
 	}
 	defer probe.Close()
 
-	// The thumbnail operation already applied the orientation
 	return Resolution{Width: probe.Width(), Height: probe.Height()}, nil
-}
-
-// Orientations 5 to 8 rotate the image a quarter turn, some of them mirrored too, and libvips' thumbnails apply them, so the variants see the two sides swapped
-func orientedSize(width int, height int, orientation int) Resolution {
-	if orientation >= 5 && orientation <= 8 {
-		return Resolution{Width: height, Height: width}
-	}
-	return Resolution{Width: width, Height: height}
 }
 
 // Encode the resized image in the requested format
@@ -241,7 +224,7 @@ func (e *Encoder) export(img *vips.ImageRef, req Request) ([]byte, error) {
 // Validate the request, catching the combinations libvips would either reject or silently reinterpret
 func (r Request) validate() error {
 	switch {
-	case len(r.Source) == 0:
+	case r.Source == "":
 		return fmt.Errorf("%w: source image is empty", ErrInvalidRequest)
 	case r.Resolution.Width <= 0 && r.Resolution.Height <= 0:
 		return errEmptyResolution

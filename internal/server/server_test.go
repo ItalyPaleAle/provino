@@ -588,11 +588,13 @@ func TestIngest(t *testing.T) {
 		assert.Equal(t, 400, job.Source.Width)
 		assert.Equal(t, 300, job.Source.Height)
 		require.Len(t, job.Variants, 1)
-		assert.Equal(t, "100x100.webp", job.Variants[0].Name)
+		assert.Equal(t, imaging.Resolution{Width: 100, Height: 100}, job.Variants[0].Resolution)
 		assert.Equal(t, 5, job.Variants[0].Effort)
 		require.NotNil(t, job.Notify)
 		assert.Equal(t, "app", job.Notify.Endpoint, "the default endpoint is resolved when the job is requested")
 		assert.Equal(t, subjectHash("browser-1"), job.SubjectHash)
+		assert.Equal(t, time.UTC, job.RequestedAt.Location())
+		assert.Equal(t, time.UTC, job.Source.StoredAt.Location())
 
 		// The original and the manifest that records it are stored, and the cache holds a copy for the job
 		_, err := ts.store.OpenOriginal(t.Context(), "default", imageID, "png", true)
@@ -809,7 +811,7 @@ func TestClientUpload(t *testing.T) {
 		job := ts.jobs.last(t)
 		require.Len(t, job.Variants, 1)
 		assert.Equal(t, imaging.FormatJPEG, job.Variants[0].Format)
-		assert.Equal(t, "50xauto.jpg", job.Variants[0].Name)
+		assert.Equal(t, imaging.Resolution{Width: 50}, job.Variants[0].Resolution)
 		assert.JSONEq(t, `{"k":"v"}`, string(job.Notify.Context))
 		// A backend's job carries no subject, so no browser can read it
 		assert.Empty(t, job.SubjectHash)
@@ -975,6 +977,7 @@ func TestOptimize(t *testing.T) {
 		assert.Equal(t, "jpg", job.SourceFormat)
 		assert.Nil(t, job.Source)
 		require.Len(t, job.Variants, 1)
+		assert.Equal(t, time.UTC, job.RequestedAt.Location())
 	})
 
 	failures := map[string]struct {
@@ -986,7 +989,7 @@ func TestOptimize(t *testing.T) {
 		"no variants":            {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String()}, status: http.StatusBadRequest, code: "invalid_variants"},
 		"an invalid image ID":    {request: client.OptimizeRequest{Namespace: "x", ImageID: "nope"}, status: http.StatusBadRequest, code: "invalid_image_id"},
 		"an unknown format":      {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), SourceFormat: "gif", Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}}, status: http.StatusBadRequest, code: "invalid_source_format"},
-		"conflicting variants":   {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "jpg", Quality: 80, Size: variant.Resolution{Width: 1}}, {Format: "jpg", Quality: 70, Size: variant.Resolution{Width: 1}}}}, status: http.StatusBadRequest, code: "invalid_variants"},
+		"conflicting variants":   {request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "webp", Quality: 80, Effort: new(2), Size: variant.Resolution{Width: 1}}, {Format: "webp", Quality: 80, Effort: new(4), Size: variant.Resolution{Width: 1}}}}, status: http.StatusBadRequest, code: "invalid_variants"},
 		"a body that isn't JSON": {request: "not an object", status: http.StatusBadRequest, code: "invalid_body"},
 		"an image with another job running": {
 			request: client.OptimizeRequest{Namespace: "x", ImageID: uuid.NewV4().String(), Variants: []variant.Spec{{Format: "png", Size: variant.Resolution{Width: 1}}}},

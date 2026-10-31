@@ -60,6 +60,8 @@ Delivery is a step of the job's durable workflow. The app must respond with a `2
 
 A job whose variants are stored completes even if its event is never acknowledged, since the outcome is also in the manifest. An `image.failed` event is retried up to five times while the job unwinds, and then dropped.
 
+The image is free for its next job before its event is delivered. The events of two jobs of one image that run back to back can then arrive out of order if a webhook receiver is slow, so a receiver that keeps the latest state of an image should go by `timestamp`.
+
 Deliveries are at least once, so a handler must be idempotent. Every attempt carries the same `webhook-id`, derived from the job ID and the event type, so a handler can recognize a repeat.
 
 ## Authentication

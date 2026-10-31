@@ -1,0 +1,6 @@
+# The two servers of the example, which `make example` runs with goreman from the repository's root
+# Each one runs with `go run`, so restarting it with `go tool goreman run restart <name>` picks up its changes
+# provino starts once the app answers, because it fetches the app's key set when it starts
+
+app: pnpm --dir example/web build && exec go run ./example
+provino: until curl -fs -o /dev/null http://localhost:3001/.well-known/openid-configuration; do [ -n "$waiting" ] || echo "Waiting for the example app at http://localhost:3001"; waiting=1; sleep 0.5; done && PROVINO_CONFIG=example/provino.yaml exec go run ./cmd/provino

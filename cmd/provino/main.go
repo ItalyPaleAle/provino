@@ -122,8 +122,7 @@ func main() {
 	// Init libvips, which generates the variants
 	// It's deliberately not among the shutdown functions, which run together, so an encode still draining can't lose libvips from under it
 	err = imaging.Startup(ctx, imaging.Options{
-		CacheMaxMemory: cfg.Images.VipsCacheMaxMemory,
-		Logger:         log.With(slog.String("scope", "libvips")),
+		Logger: log.With(slog.String("scope", "libvips")),
 	})
 	if err != nil {
 		shutdowns.Run(log)

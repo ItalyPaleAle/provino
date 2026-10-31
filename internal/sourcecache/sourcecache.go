@@ -22,10 +22,9 @@ import (
 )
 
 const (
-	// Permissions of the cache folder and of the files in it
+	// Permissions of the cache folder, while os.CreateTemp already creates every file in it as 0600
 	// Source images of every site pass through here, and nothing outside this process ever reads them
-	dirPerm  fs.FileMode = 0o700
-	filePerm fs.FileMode = 0o600
+	dirPerm fs.FileMode = 0o700
 
 	// Suffix every cached file carries, so the folder says what it holds to whoever finds it on a host
 	cacheFileSuffix = ".orig"
@@ -135,32 +134,35 @@ func (c *Cache) Prefetch(ctx context.Context, namespace string, imageID uuid.UUI
 	return c.download(ctx, namespace, imageID, format)
 }
 
-// Read returns an image's source, downloading it first when it isn't cached
+// Get returns the path of an image's cached source, downloading it first when it isn't cached
 //
 // A variant runs on whichever host Francis placed its actor on, which isn't necessarily the one that prefetched the source, so a miss here is ordinary rather than exceptional
-func (c *Cache) Read(ctx context.Context, namespace string, imageID uuid.UUID, format string) ([]byte, error) {
-	data, err := c.readFile(namespace, imageID)
+// The caller hands the path to libvips, which reads only as much of the file as it needs, rather than to the Go heap
+func (c *Cache) Get(ctx context.Context, namespace string, imageID uuid.UUID, format string) (string, error) {
+	path := c.Path(namespace, imageID)
+	err := c.check(path)
 	switch {
 	case err == nil:
-		return data, nil
+		return path, nil
 	case errors.Is(err, store.ErrTooLarge):
 		// The limit is this process's own, so downloading the same object again can only reach the same verdict
-		return nil, err
+		return "", err
 	case !errors.Is(err, fs.ErrNotExist):
-		// A cached file that can't be read is not worth keeping, and downloading it again is what the miss below does anyway
-		c.log.WarnContext(ctx, "Failed to read a cached source image, downloading it again",
+		// A cached file that can't be used is not worth keeping, and downloading it again is what the miss below does anyway
+		c.log.WarnContext(ctx, "Failed to use a cached source image, downloading it again",
 			slog.String("imageId", imageID.String()),
 			slog.Any("error", err),
 		)
 		c.removeQuietly(ctx, namespace, imageID)
 	}
 
+	// The download enforces the size limit itself, so the file it publishes needs no further check
 	err = c.download(ctx, namespace, imageID, format)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return c.readFile(namespace, imageID)
+	return path, nil
 }
 
 // Remove deletes the cached source of one image, and does nothing when it isn't cached
@@ -184,13 +186,6 @@ func (c *Cache) CreateTemp() (*os.File, error) {
 	tmp, err := os.CreateTemp(c.dir, tempFilePattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a temporary file in '%s': %w", c.dir, err)
-	}
-
-	err = tmp.Chmod(filePerm)
-	if err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return nil, fmt.Errorf("failed to set the permissions of '%s': %w", tmp.Name(), err)
 	}
 
 	return tmp, nil
@@ -310,9 +305,9 @@ func (c *Cache) downloadOnce(ctx context.Context, namespace string, imageID uuid
 	defer body.Close() //nolint:errcheck
 
 	// The temporary file is created in the cache folder itself, so the rename that publishes it stays within one file system, which is what makes that rename atomic
-	tmp, err := os.CreateTemp(c.dir, tempFilePattern)
+	tmp, err := c.CreateTemp()
 	if err != nil {
-		return fmt.Errorf("failed to create a temporary file in '%s': %w", c.dir, err)
+		return err
 	}
 	tmpName := tmp.Name()
 
@@ -321,11 +316,6 @@ func (c *Cache) downloadOnce(ctx context.Context, namespace string, imageID uuid
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 	}()
-
-	err = tmp.Chmod(filePerm)
-	if err != nil {
-		return fmt.Errorf("failed to set the permissions of '%s': %w", tmpName, err)
-	}
 
 	// Copying one byte past the limit is what tells an object that is exactly at the limit apart from one that is over it
 	written, err := io.Copy(tmp, io.LimitReader(body, c.maxSize+1))
@@ -359,36 +349,23 @@ func (c *Cache) downloadOnce(ctx context.Context, namespace string, imageID uuid
 	return nil
 }
 
-// Read one cached file, refusing the ones larger than what this process is willing to encode
-// The size is taken from the open file rather than from the path, so a file replaced by a concurrent download can't make this read past what it measured
-func (c *Cache) readFile(namespace string, imageID uuid.UUID) ([]byte, error) {
-	f, err := os.Open(c.Path(namespace, imageID))
+// Check that a cached file can be used, refusing the ones larger than what this process is willing to encode
+func (c *Cache) check(path string) error {
+	info, err := os.Stat(path)
 	if err != nil {
 		// The caller tells a miss apart from a real failure, so this one keeps fs.ErrNotExist reachable
-		return nil, err //nolint:wrapcheck
-	}
-	defer f.Close() //nolint:errcheck
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("failed to measure the cached source image: %w", err)
+		return err //nolint:wrapcheck
 	}
 
-	// Only a regular file has a size worth comparing against the limit, so anything else is reported as unreadable and downloaded again rather than measured
+	// Only a regular file has a size worth comparing against the limit, so anything else is reported as unusable and downloaded again rather than measured
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("the cached source image is not a regular file: %s", info.Mode().String())
+		return fmt.Errorf("the cached source image is not a regular file: %s", info.Mode().String())
 	}
 	if info.Size() > c.maxSize {
-		return nil, store.ErrTooLarge
+		return store.ErrTooLarge
 	}
 
-	data := make([]byte, info.Size())
-	_, err = io.ReadFull(f, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read the cached source image: %w", err)
-	}
-
-	return data, nil
+	return nil
 }
 
 // Remove a cached file without reporting the outcome, used on the paths that are already recovering from a failure

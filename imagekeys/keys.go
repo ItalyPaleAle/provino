@@ -1,16 +1,20 @@
 // Package imagekeys is the object key layout provino stores an image's objects under
 //
 // Applications that serve the variants, or that read the original back, address the same objects in the same stores, so the layout is a contract rather than an implementation detail
-// The manifest records the full key of every object it describes, so most readers don't need this package; it's here for the ones that compute keys themselves
+// A variant's key ends with a random file ID, so readers find the variants through the manifest, which records the full key of every object it describes
 package imagekeys
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"uuid"
+
+	"github.com/italypaleale/provino/variant"
 )
 
 // Name of the object describing what a job produced for one image
@@ -18,6 +22,12 @@ const manifestName = "manifest.json"
 
 // A namespace is a short, lowercase, path-safe name, so it can be the first segment of every key without escaping it
 var namespaceRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// Number of random bytes in a file ID, which is written as twice as many hex digits
+const fileIDBytes = 4
+
+// A file ID is the random part of a variant's key, in lowercase hex
+var fileIDRegex = regexp.MustCompile(`^[0-9a-f]{8}$`)
 
 // Layout builds the keys of the objects belonging to one image
 //
@@ -37,13 +47,20 @@ func (l Layout) OriginalKey(namespace string, imageID uuid.UUID, format string) 
 	return l.prefix(namespace, imageID) + imageID.String() + "_orig" + extension(format)
 }
 
-// AssetKey returns the key of one generated variant of an image
+// AssetKey returns the key of one generated variant of an image, for example "<imageId>_1200x800_3f9a0c1e.webp"
 //
-// The quality a variant was encoded at is deliberately absent: an image has one variant per size and format, and the quality it is encoded at is a property of the request that created it rather than of the object
-// Putting it in the key would make two encodings of the same size and format two different objects, which is not something anything downstream can address
-func (l Layout) AssetKey(namespace string, imageID uuid.UUID, width int, height int, format string) string {
-	name := imageID.String() + "_" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + extension(format)
-	return l.prefix(namespace, imageID) + name
+// The size is the one the file came out at, so the name tells what's in it, and the file ID is random, so every file a job encodes is a new object
+// A key is written once and its bytes never change, which is what lets an application serve it as immutable and lets a failed job delete every file it wrote
+// The file ID must have been made by NewFileID or checked with ValidateFileID
+func (l Layout) AssetKey(namespace string, imageID uuid.UUID, width int, height int, fileID string, format variant.Format) string {
+	return l.prefix(namespace, imageID) + imageID.String() + "_" + strconv.Itoa(width) + "x" + strconv.Itoa(height) + "_" + fileID + format.Extension()
+}
+
+// OwnsKey reports whether a key names an object of one image: one stored under the image's prefix, with a name that starts with the image's ID
+// Keys read back from a manifest are checked with it, so a manifest can only ever point a job at the files of its own image
+func (l Layout) OwnsKey(namespace string, imageID uuid.UUID, key string) bool {
+	name, found := strings.CutPrefix(key, l.prefix(namespace, imageID)+imageID.String()+"_")
+	return found && name != "" && !strings.Contains(name, "/") && !strings.Contains(name, "..")
 }
 
 // ManifestKey returns the key of the manifest describing everything generated for an image
@@ -68,6 +85,37 @@ func (l Layout) prefix(namespace string, imageID uuid.UUID) string {
 func shard(imageID uuid.UUID) string {
 	s := imageID.String()
 	return s[:2] + "/" + s[2:4]
+}
+
+// NewFileID returns a random file ID, the last part of a variant's key, as 8 lowercase hex digits
+// It only has to be unique among the files of one image, which the caller checks against the IDs the image already uses
+func NewFileID() string {
+	b := make([]byte, fileIDBytes)
+	// crypto/rand never returns an error
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// ValidateFileID checks that a file ID read back from durable state is one NewFileID could have made, so it's safe in an object key
+func ValidateFileID(fileID string) error {
+	if !fileIDRegex.MatchString(fileID) {
+		return fmt.Errorf("file ID '%s' is not 8 lowercase hex digits", fileID)
+	}
+	return nil
+}
+
+// FileIDOf returns the file ID a variant's key ends with, or an empty string for a key that doesn't end with one, such as a name an older layout gave a file
+func FileIDOf(key string) string {
+	name := key[strings.LastIndexByte(key, '/')+1:]
+	dot := strings.LastIndexByte(name, '.')
+	if dot >= 0 {
+		name = name[:dot]
+	}
+	fileID := name[strings.LastIndexByte(name, '_')+1:]
+	if !fileIDRegex.MatchString(fileID) {
+		return ""
+	}
+	return fileID
 }
 
 // ValidateNamespace checks that a namespace can be the first segment of an object key

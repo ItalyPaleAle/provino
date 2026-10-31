@@ -76,11 +76,10 @@ func GetDefaultConfig() *Config {
 			Variants:  "./data/variants",
 		},
 		Images: ConfigImages{
-			MaxUploadSize:      32 << 20, // 32MB
-			MaxSourcePixels:    50_000_000,
-			MaxVariants:        48,
-			MaxResolution:      8192,
-			VipsCacheMaxMemory: 50 << 20, // 50MB
+			MaxUploadSize:   32 << 20, // 32MB
+			MaxSourcePixels: 50_000_000,
+			MaxVariants:     48,
+			MaxResolution:   8192,
 		},
 		Dev: defaultDevConfig,
 	}

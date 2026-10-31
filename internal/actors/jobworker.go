@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"time"
 	"uuid"
 
@@ -14,7 +16,6 @@ import (
 	"github.com/italypaleale/provino/imagekeys"
 	"github.com/italypaleale/provino/internal/imaging"
 	"github.com/italypaleale/provino/internal/store"
-	"github.com/italypaleale/provino/manifest"
 )
 
 // Generate one variant and return its result to the workflow journal
@@ -42,17 +43,17 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	log := w.runtime.Log.With(
 		slog.String("imageId", task.ImageID),
 		slog.Int("index", task.Spec.Index),
-		slog.String("name", task.Spec.Name),
+		slog.String("format", string(task.Spec.Format)),
+		slog.String("box", task.Spec.Resolution.String()),
 	)
 
 	result := VariantResult{
 		Index: task.Spec.Index,
-		Name:  task.Spec.Name,
 	}
 	// A box the source can't fill, whose pixels another variant of this job holds, encodes nothing: the manifest repeats the holder's file for it
 	if task.Skip != nil {
 		skip := *task.Skip
-		result.CompletedAt = time.Now()
+		result.CompletedAt = time.Now().UTC()
 		result.Skipped = &skip
 		log.DebugContext(ctx, "Skipped a variant the source can't fill",
 			slog.Int("heldBy", skip.Index),
@@ -66,7 +67,7 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 		result.Width = existing.Width
 		result.Height = existing.Height
 		result.Size = existing.Size
-		result.CompletedAt = time.Now()
+		result.CompletedAt = time.Now().UTC()
 		result.Reused = &existing
 		log.DebugContext(ctx, "Reused an existing variant",
 			slog.Int("width", existing.Width),
@@ -77,41 +78,25 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	}
 
 	start := time.Now()
-	res, kept, err := w.encode(ctx, task)
+	res, key, err := w.encode(ctx, task)
 	duration := time.Since(start)
 
 	if err != nil {
-		if w.runtime.Metrics != nil {
-			w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), false, duration)
-		}
+		w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), false, duration)
 		log.ErrorContext(ctx, "Failed to generate variant", slog.Any("error", err))
-		return VariantResult{}, fmt.Errorf("failed to generate variant '%s': %w", task.Spec.Name, err)
-	}
-
-	result.DurationMs = duration.Milliseconds()
-	result.CompletedAt = time.Now()
-
-	// The encode came out as a file another variant reuses with the same settings, so that stored file describes this variant too
-	if kept != nil {
-		result.Width = kept.Width
-		result.Height = kept.Height
-		result.Size = kept.Size
-		result.Reused = kept
-		log.DebugContext(ctx, "Kept a stored file another variant reuses, since the encode came out as the same file",
-			slog.Int("width", kept.Width),
-			slog.Int("height", kept.Height),
-		)
-		return result, nil
+		return VariantResult{}, fmt.Errorf("failed to generate variant %d: %w", task.Spec.Index, err)
 	}
 
 	result.Width = res.Width
 	result.Height = res.Height
 	result.Size = res.Size
+	result.DurationMs = duration.Milliseconds()
+	result.CompletedAt = time.Now().UTC()
+	result.Key = key
 
-	if w.runtime.Metrics != nil {
-		w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), true, duration)
-	}
+	w.runtime.Metrics.RecordVariant(ctx, string(task.Spec.Format), true, duration)
 	log.InfoContext(ctx, "Generated variant",
+		slog.String("key", key),
 		slog.Int("width", res.Width),
 		slog.Int("height", res.Height),
 		slog.Int64("size", res.Size),
@@ -121,22 +106,26 @@ func (w *jobWorkflowHandlers) generate(ctx context.Context, task variantTask) (V
 	return result, nil
 }
 
-// Read the source image, encode the variant, and write it back to the store
-// When the encode comes out as a stored file another variant of the job reuses with the same settings, nothing is written and that file's entry is returned instead
-func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (imaging.Result, *manifest.Variant, error) {
+// Encode the variant from the locally cached source, and store it at a key named after the size it came out at and the task's file ID
+// It returns the key, which the manifest lists and a failed job deletes
+func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (imaging.Result, string, error) {
 	// Durable workflow input is re-checked where it becomes an object key
 	namespace, imageID, err := taskIDs(task)
 	if err != nil {
-		return imaging.Result{}, nil, fmt.Errorf("%w: %w", imaging.ErrInvalidRequest, err)
+		return imaging.Result{}, "", fmt.Errorf("%w: %w", imaging.ErrInvalidRequest, err)
+	}
+	err = imagekeys.ValidateFileID(task.FileID)
+	if err != nil {
+		return imaging.Result{}, "", fmt.Errorf("%w: %w", imaging.ErrInvalidRequest, err)
 	}
 
 	// A fan-out task may run on another host than prepare, so a local cache miss downloads the source on demand
-	source, err := w.runtime.SourceCache.Read(ctx, namespace, imageID, task.SourceFormat)
+	source, err := w.runtime.SourceCache.Get(ctx, namespace, imageID, task.SourceFormat)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrTooLarge) {
-			return imaging.Result{}, nil, fmt.Errorf("%w: %w", imaging.ErrSourceUnreadable, err)
+			return imaging.Result{}, "", fmt.Errorf("%w: %w", imaging.ErrSourceUnreadable, err)
 		}
-		return imaging.Result{}, nil, fmt.Errorf("failed to read the source image: %w", err)
+		return imaging.Result{}, "", fmt.Errorf("failed to read the source image: %w", err)
 	}
 
 	res, err := w.runtime.Encoder.Generate(ctx, imaging.Request{
@@ -148,31 +137,32 @@ func (w *jobWorkflowHandlers) encode(ctx context.Context, task variantTask) (ima
 		Fit:        task.Spec.Fit,
 	})
 	if err != nil {
-		return imaging.Result{}, nil, fmt.Errorf("failed to encode the variant: %w", err)
-	}
-
-	// A file another variant reuses is kept as it is, because its manifest entry describes those exact bytes and a failed job puts that entry back
-	// Encoding it again with the same settings changes nothing, while different settings would leave one of the two entries describing the wrong file
-	reserved, found := task.reservedAt(res.Width, res.Height, task.Spec.Format)
-	if found {
-		if reserved.Stored.Quality != task.Spec.Quality || reserved.Stored.Effort != task.Spec.Effort {
-			return imaging.Result{}, nil, fmt.Errorf("%w: variant '%s' (quality %d, effort %d) comes out as the %dx%d%s file, which variant '%s' reuses as stored with quality %d and effort %d: give them the same quality and effort", imaging.ErrInvalidRequest, task.Spec.Name, task.Spec.Quality, task.Spec.Effort, res.Width, res.Height, task.Spec.Format.Extension(), reserved.Name, reserved.Stored.Quality, reserved.Stored.Effort)
+		// libvips opens the cached file by its path, so a sweep that removed it in between looks like an unreadable source, when downloading it again is all it takes
+		// The error is reported without wrapping, so it isn't classified as permanent
+		if errors.Is(err, imaging.ErrSourceUnreadable) {
+			_, statErr := os.Stat(source)
+			if errors.Is(statErr, fs.ErrNotExist) {
+				return imaging.Result{}, "", fmt.Errorf("the cached source image was removed before it could be encoded: %s", err.Error())
+			}
 		}
-		return res, &reserved.Stored, nil
+		return imaging.Result{}, "", fmt.Errorf("failed to encode the variant: %w", err)
 	}
 
-	// A retried workflow task writes the same key, so the last complete encode wins without leaving duplicates
-	err = w.runtime.Store.SaveVariant(ctx, namespace, imageID, res.Width, res.Height, task.Spec.Format.Extension(), res.Data, task.Spec.Format.ContentType())
+	// The file ID is one no file of the image had when the job was planned, so this never writes over a file a manifest lists
+	// A retried task encodes the same size and has the same file ID, so it writes the same key instead of leaving another file behind
+	key := w.runtime.Store.AssetKey(namespace, imageID, res.Width, res.Height, task.FileID, task.Spec.Format)
+	err = w.runtime.Store.SaveVariant(ctx, key, res.Data, task.Spec.Format.ContentType())
 	if err != nil {
-		return imaging.Result{}, nil, fmt.Errorf("failed to store the variant: %w", err)
+		return imaging.Result{}, "", fmt.Errorf("failed to store the variant: %w", err)
 	}
 
-	return res, nil, nil
+	return res, key, nil
 }
 
-// Delete one variant when a later task fails and Francis unwinds the fan-out
+// Delete the file one variant stored when a later task fails and Francis unwinds the fan-out
 //
-// A file the manifest the job found still lists is kept, because a variant of the same size and format is stored under the same key, and that manifest is the one the image is left with
+// Every file a job encodes is at a key it chose, which no file of the image had, so a failed job deletes all of them, while reused and skipped variants stored nothing
+// A retried compensation finds the file already gone, which isn't an error
 func (w *jobWorkflowHandlers) deleteVariant(ctx context.Context, compensation francisworkflow.Compensation) error {
 	var input variantTask
 	err := compensation.DecodeItem(&input)
@@ -185,39 +175,27 @@ func (w *jobWorkflowHandlers) deleteVariant(ctx context.Context, compensation fr
 	if err != nil {
 		return errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("failed to decode the variant result for compensation: %w", err))
 	}
-	// Reused and skipped variants stored nothing in this attempt, so there's nothing of theirs to delete
-	if result.Reused != nil || result.Skipped != nil {
+	if result.Key == "" {
 		return nil
 	}
 
+	// The key comes from the journal, so it's checked to be one of the image's objects before anything is deleted
 	namespace, imageID, err := taskIDs(input)
 	if err != nil {
 		return errors.Join(actor.ErrJobPermanentFailure, err)
 	}
-
-	// Without the snapshot it isn't known what the previous manifest references, and keeping an orphaned file is the harmless mistake
-	var snap jobSnapshot
-	err = compensation.DecodeOutput(stepSnapshot, &snap)
-	if err != nil {
-		w.runtime.Log.WarnContext(ctx, "Kept a generated variant while compensating, because the job's snapshot couldn't be read", slog.String("name", input.Spec.Name), slog.Any("error", err))
-		return nil
-	}
-	previous := w.parsePrevious(ctx, snap.Previous, namespace, imageID)
-	if previous != nil {
-		for _, entry := range previous.Variants {
-			if !entry.Skipped && entry.Width == result.Width && entry.Height == result.Height && entry.Format.Extension() == input.Spec.Format.Extension() {
-				return nil
-			}
-		}
+	if !w.runtime.Store.OwnsKey(namespace, imageID, result.Key) {
+		return errors.Join(actor.ErrJobPermanentFailure, fmt.Errorf("the key '%s' recorded for variant %d isn't one of the image's objects", result.Key, input.Spec.Index))
 	}
 
-	err = w.runtime.Store.RemoveVariant(ctx, namespace, imageID, result.Width, result.Height, input.Spec.Format.Extension())
+	err = w.runtime.Store.RemoveVariant(ctx, result.Key)
 	if err != nil {
 		return fmt.Errorf("failed to compensate the generated variant: %w", err)
 	}
 
 	w.runtime.Log.InfoContext(ctx, "Removed a generated variant while compensating the job",
-		slog.String("name", input.Spec.Name),
+		slog.Int("index", input.Spec.Index),
+		slog.String("key", result.Key),
 	)
 	return nil
 }

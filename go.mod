@@ -2,7 +2,15 @@ module github.com/italypaleale/provino
 
 go 1.27.3
 
-tool github.com/fchimpan/gomod-age
+ignore ./example/web/node_modules
+
+tool (
+	github.com/fchimpan/gomod-age
+	github.com/italypaleale/go-kit/tools/gen-config
+	github.com/italypaleale/go-kit/tools/openapi-convert
+	github.com/mattn/goreman
+	github.com/swaggo/swag/cmd/swag
+)
 
 require (
 	github.com/davidbyttow/govips/v2 v2.20.0
@@ -20,6 +28,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/oauth2 v0.37.0
+	modernc.org/sqlite v1.61.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -62,6 +71,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.11.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
 	github.com/lestrrat-go/dsig v1.4.0 // indirect
@@ -69,7 +79,9 @@ require (
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/lestrrat-go/option/v3 v3.0.0-alpha1 // indirect
 	github.com/lmittmann/tint v1.2.1 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/mattn/goreman v0.3.19 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
@@ -128,15 +140,9 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3 // indirect
-	modernc.org/libc v1.78.0 // indirect
+	modernc.org/libc v1.79.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.60.1 // indirect
-)
-
-tool (
-	github.com/italypaleale/go-kit/tools/gen-config
-	github.com/italypaleale/go-kit/tools/openapi-convert
-	github.com/swaggo/swag/cmd/swag
 )

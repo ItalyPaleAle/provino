@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestPrefetch(t *testing.T) {
 
 		info, err := os.Stat(c.Path(testNamespace, testImageID))
 		require.NoError(t, err)
-		assert.Equal(t, filePerm, info.Mode().Perm())
+		assert.Equal(t, fs.FileMode(0o600), info.Mode().Perm())
 	})
 
 	t.Run("reports a source that isn't there", func(t *testing.T) {
@@ -160,28 +161,43 @@ func TestPrefetch(t *testing.T) {
 	})
 }
 
-func TestRead(t *testing.T) {
+// Get an image's source through the cache and read the file it hands out
+func readCached(t *testing.T, c *Cache, imageID uuid.UUID, format string) (string, error) {
+	t.Helper()
+
+	path, err := c.Get(t.Context(), testNamespace, imageID, format)
+	if err != nil {
+		return "", err
+	}
+	assert.Equal(t, c.Path(testNamespace, imageID), path)
+
+	data, err := os.ReadFile(path) //nolint:gosec // The path is inside a temporary folder this test created
+	require.NoError(t, err)
+	return string(data), nil
+}
+
+func TestGet(t *testing.T) {
 	t.Run("downloads a source that isn't cached", func(t *testing.T) {
 		source := &fakeSource{data: "image-data"}
 		c := newTestCache(t, source, 1024)
 
-		data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		data, err := readCached(t, c, testImageID, ".jpg")
 		require.NoError(t, err)
-		assert.Equal(t, "image-data", string(data))
+		assert.Equal(t, "image-data", data)
 		assert.Equal(t, int32(1), source.cachedReads.Load())
 	})
 
 	// This is the point of the cache: every variant after the first reads the file the workflow left behind
-	t.Run("reads a cached source without downloading it again", func(t *testing.T) {
+	t.Run("hands out a cached source without downloading it again", func(t *testing.T) {
 		source := &fakeSource{data: "image-data"}
 		c := newTestCache(t, source, 1024)
 
 		err := c.Prefetch(t.Context(), testNamespace, testImageID, ".jpg")
 		require.NoError(t, err)
 		for range 5 {
-			data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+			data, err := readCached(t, c, testImageID, ".jpg")
 			require.NoError(t, err)
-			assert.Equal(t, "image-data", string(data))
+			assert.Equal(t, "image-data", data)
 		}
 
 		assert.Equal(t, int32(1), source.cachedReads.Load())
@@ -193,32 +209,44 @@ func TestRead(t *testing.T) {
 		source := &fakeSource{data: "image-data"}
 		c := newTestCache(t, source, 4)
 
-		_, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		_, err := c.Get(t.Context(), testNamespace, testImageID, ".jpg")
 		require.ErrorIs(t, err, store.ErrTooLarge)
 		assert.NoFileExists(t, c.Path(testNamespace, testImageID))
 		assert.Equal(t, int32(1), source.cachedReads.Load())
 		assert.Zero(t, source.consistentReads.Load())
 	})
 
+	// A file cached before the limit was lowered is refused too, without downloading it again
+	t.Run("refuses a cached file over the maximum size", func(t *testing.T) {
+		source := &fakeSource{data: "image-data"}
+		c := newTestCache(t, source, 4)
+		err := os.WriteFile(c.Path(testNamespace, testImageID), []byte("image-data"), 0o600)
+		require.NoError(t, err)
+
+		_, err = c.Get(t.Context(), testNamespace, testImageID, ".jpg")
+		require.ErrorIs(t, err, store.ErrTooLarge)
+		assert.Zero(t, source.cachedReads.Load()+source.consistentReads.Load())
+	})
+
 	// A source exactly at the limit is the one an off-by-one gets wrong
 	t.Run("accepts a source exactly at the maximum size", func(t *testing.T) {
 		c := newTestCache(t, &fakeSource{data: "image-data"}, int64(len("image-data")))
 
-		data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		data, err := readCached(t, c, testImageID, ".jpg")
 		require.NoError(t, err)
-		assert.Equal(t, "image-data", string(data))
+		assert.Equal(t, "image-data", data)
 	})
 
-	t.Run("replaces a cached file that cannot be read", func(t *testing.T) {
+	t.Run("replaces a cached file that cannot be used", func(t *testing.T) {
 		c := newTestCache(t, &fakeSource{data: "image-data"}, 1024)
 
-		// A folder where the file should be is unreadable in a way that isn't a miss, which is what a corrupted cache looks like from here
+		// A folder where the file should be is unusable in a way that isn't a miss, which is what a corrupted cache looks like from here
 		err := os.Mkdir(c.Path(testNamespace, testImageID), dirPerm)
 		require.NoError(t, err)
 
-		data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		data, err := readCached(t, c, testImageID, ".jpg")
 		require.NoError(t, err)
-		assert.Equal(t, "image-data", string(data))
+		assert.Equal(t, "image-data", data)
 	})
 }
 
@@ -228,9 +256,9 @@ func TestDownloadRetriesAgainstTheStore(t *testing.T) {
 		source := &fakeSource{data: "image-data", failCached: true}
 		c := newTestCache(t, source, 1024)
 
-		data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		data, err := readCached(t, c, testImageID, ".jpg")
 		require.NoError(t, err)
-		assert.Equal(t, "image-data", string(data))
+		assert.Equal(t, "image-data", data)
 
 		// The cached read is what every attempt starts with, since it's the cheaper one and the one that almost always succeeds
 		assert.Equal(t, int32(1), source.cachedReads.Load())
@@ -241,7 +269,7 @@ func TestDownloadRetriesAgainstTheStore(t *testing.T) {
 		source := &fakeSource{data: "image-data", readErr: errors.New("connection reset")}
 		c := newTestCache(t, source, 1024)
 
-		_, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
+		_, err := c.Get(t.Context(), testNamespace, testImageID, ".jpg")
 		require.Error(t, err)
 
 		// Both attempts failed, and neither left a partial file behind for a variant to encode from
@@ -268,18 +296,23 @@ func TestConcurrentDownloadsLeaveOneCompleteFile(t *testing.T) {
 	source := &fakeSource{data: strings.Repeat("image-data", 4096)}
 	c := newTestCache(t, source, 1<<20)
 
+	// The goroutines only record what they got, since a failing require can't stop the test from one of them
 	var wg sync.WaitGroup
 	results := make([][]byte, 8)
+	errs := make([]error, len(results))
 	for i := range results {
 		wg.Go(func() {
-			data, err := c.Read(t.Context(), testNamespace, testImageID, ".jpg")
-			assert.NoError(t, err)
-			results[i] = data
+			var path string
+			path, errs[i] = c.Get(t.Context(), testNamespace, testImageID, ".jpg")
+			if errs[i] == nil {
+				results[i], errs[i] = os.ReadFile(path) //nolint:gosec // The path is inside a temporary folder this test created
+			}
 		})
 	}
 	wg.Wait()
 
-	for _, data := range results {
+	for i, data := range results {
+		require.NoError(t, errs[i])
 		assert.Equal(t, source.data, string(data))
 	}
 	assertNoTempFiles(t, c)
@@ -310,7 +343,7 @@ func TestSweep(t *testing.T) {
 
 	fresh := c.Path(testNamespace, testImageID)
 	stale := c.Path(testNamespace, uuid.NewV4())
-	err = os.WriteFile(stale, []byte("left behind"), filePerm)
+	err = os.WriteFile(stale, []byte("left behind"), 0o600)
 	require.NoError(t, err)
 	old := time.Now().Add(-2 * time.Hour)
 	err = os.Chtimes(stale, old, old)
@@ -385,9 +418,9 @@ func TestCacheAdoptPublishesAnUploadedSource(t *testing.T) {
 	err = cache.Adopt(tmp.Name(), testNamespace, imageID)
 	require.NoError(t, err)
 
-	data, err := cache.Read(t.Context(), testNamespace, imageID, ".png")
+	data, err := readCached(t, cache, imageID, ".png")
 	require.NoError(t, err)
-	assert.Equal(t, "uploaded bytes", string(data))
+	assert.Equal(t, "uploaded bytes", data)
 	assert.Zero(t, source.cachedReads.Load()+source.consistentReads.Load(), "an adopted source must not be downloaded again")
 
 	_, err = os.Stat(tmp.Name())

@@ -292,24 +292,16 @@ func (s Spec) EffortValue() int {
 	return *s.Effort
 }
 
-// Name returns the name a variant is listed under in the manifest
-// Cover is in the name because a set can hold the same box with both fits, and their entries have to stay apart
-func (s Spec) Name() string {
-	name := s.Size.Slug()
-	if s.Fit.OrDefault() == FitCover {
-		name += "-cover"
-	}
-	return name + s.Format.Extension()
-}
-
 // NormalizeSet validates a list of specs, drops exact duplicates, and returns the rest in canonical form, in the order they were given
 //
-// Two specs that describe the same box, fit and format but different encoder settings are refused: a variant is stored under its size and format, so the two would overwrite each other
+// The same box, fit and format can be asked for at several qualities, each a file of its own
+// Two specs that differ only in their effort are refused: the effort doesn't change the picture, so both would be served by the one file a job stores or reuses
 func NormalizeSet(specs []Spec, maxResolution int, maxVariants int) ([]Spec, error) {
 	type identity struct {
-		format Format
-		fit    Fit
-		size   Resolution
+		format  Format
+		fit     Fit
+		size    Resolution
+		quality int
 	}
 
 	out := make([]Spec, 0, len(specs))
@@ -320,11 +312,11 @@ func NormalizeSet(specs []Spec, maxResolution int, maxVariants int) ([]Spec, err
 			return nil, fmt.Errorf("variant %d: %w", i, err)
 		}
 
-		key := identity{format: normalized.Format, fit: normalized.Fit, size: normalized.Size}
+		key := identity{format: normalized.Format, fit: normalized.Fit, size: normalized.Size, quality: normalized.Quality}
 		existing, found := seen[key]
 		if found {
-			if existing.Quality != normalized.Quality || existing.EffortValue() != normalized.EffortValue() {
-				return nil, fmt.Errorf("variant %d: conflicts with another variant of the same size, fit and format but different encoder settings", i)
+			if existing.EffortValue() != normalized.EffortValue() {
+				return nil, fmt.Errorf("variant %d: conflicts with another variant of the same size, fit, format and quality but a different effort", i)
 			}
 			continue
 		}

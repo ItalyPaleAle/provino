@@ -218,6 +218,8 @@ func TestValidateAuth(t *testing.T) {
 	tests := map[string]func(c *Config){
 		"none together with an API key": func(c *Config) { c.Auth.None.Enabled = true },
 		"an issuer that isn't a URL":    func(c *Config) { c.Auth.JWT.Issuer = "tenant" },
+		"an issuer without a host name": func(c *Config) { c.Auth.JWT.Issuer = "https://:443" },
+		"an issuer with a query":        func(c *Config) { c.Auth.JWT.Issuer = "https://tenant.example.com/?realm=a" },
 		"a JWKS URL that isn't a URL":   func(c *Config) { c.Auth.JWT.Issuer = "https://tenant.example.com"; c.Auth.JWT.JWKSURL = "keys.json" },
 		"a key without the prefix":      func(c *Config) { c.Auth.APIKeys[0].Key = "0123456789abcdefghijklmnopqrstuvwxyz" },
 		"a short key":                   func(c *Config) { c.Auth.APIKeys[0].Key = "pvk_short" },

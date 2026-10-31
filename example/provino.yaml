@@ -1,0 +1,50 @@
+# provino's configuration for the example app, which `make example` starts it with from the repository's root
+# See example/README.md
+
+server:
+  # Local only: the example's credentials are hardcoded
+  bind: 127.0.0.1
+  port: 3000
+  # Also the audience of the tokens the example app issues to users
+  publicUrl: http://localhost:3000
+  # The web UI uploads straight to provino from the example app's origin
+  corsAllowedOrigins:
+    - http://localhost:3001
+
+auth:
+  # Browsers present the JWT the example app's OpenID Connect provider issued when they signed in
+  jwt:
+    issuer: http://localhost:3001
+
+# Every browser upload is decided by the example app
+authorizer:
+  type: http
+  http:
+    url: http://localhost:3001/api/provino/authorize
+    auth:
+      # provino gets a token from the example app's provider with its client credentials, and any secret is accepted
+      type: oauth2
+      oauth2:
+        tokenUrl: http://localhost:3001/oauth/token
+        clientId: provino
+        clientSecret: any-secret-works
+
+# Jobs report to the example app, with the same credentials
+notify:
+  endpoints:
+    example:
+      url: http://localhost:3001/api/provino/events
+      auth:
+        type: oauth2
+        oauth2:
+          tokenUrl: http://localhost:3001/oauth/token
+          clientId: provino
+          clientSecret: any-secret-works
+
+# Everything is stored in example/data, which git ignores, and the example app serves the variants from there
+storage:
+  originals: ./example/data/originals
+  variants: ./example/data/variants
+
+actors:
+  database: sqlite://./example/data/actors.db

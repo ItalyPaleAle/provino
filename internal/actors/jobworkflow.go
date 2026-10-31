@@ -31,18 +31,19 @@ type jobWorkflowHandlers struct {
 	runtime *Runtime
 }
 
-// variantIdentity names one stored file by format and fit, with either the box that requested it or the size it came out at
-// Fit is part of it because a cover box and a contain box of the same size describe different pictures
+// variantIdentity names one stored file by format, fit and quality, with either the box that requested it or the size it came out at
+// Fit is part of it because a cover box and a contain box of the same size describe different pictures, and quality because the same pixels at another quality are another file
 type variantIdentity struct {
-	Format imaging.Format
-	Fit    imaging.Fit
-	Width  int
-	Height int
+	Format  imaging.Format
+	Fit     imaging.Fit
+	Quality int
+	Width   int
+	Height  int
 }
 
 // storedVariants indexes the files a previous job stored for an image that this one may reuse
 type storedVariants struct {
-	// Files by the box, fit and format that requested them
+	// Files by the box, fit, format and quality that requested them
 	byBox map[variantIdentity]manifest.Variant
 	// Files by the size they came out at, which is how a box the source can't fill finds a file another box stored with the same pixels
 	byOutput map[variantIdentity]manifest.Variant
@@ -93,7 +94,6 @@ func NewJobWorkflow(rt *Runtime, concurrency int) (*francisworkflow.Workflow, er
 			),
 			francisworkflow.ForEach(stepGenerate,
 				francisworkflow.WithItemsFrom(stepPrepare),
-				francisworkflow.WithInputFrom(stepSnapshot),
 				francisworkflow.WithRun(h.generateVariant),
 				francisworkflow.WithCompensate(h.deleteVariant),
 				francisworkflow.WithFailurePolicy(francisworkflow.FailFast),
@@ -109,18 +109,20 @@ func NewJobWorkflow(rt *Runtime, concurrency int) (*francisworkflow.Workflow, er
 				francisworkflow.WithCompensateTimeout(rt.WorkflowTimeout),
 			),
 			// Every step after the manifest is optional or can't fail, so a job whose variants are stored never unwinds them because a notification or a local cleanup went wrong
-			francisworkflow.Step(stepNotify,
-				francisworkflow.WithRun(h.notify),
+			// The local source is removed before the image is freed, so it can't remove a copy the image's next job just downloaded
+			francisworkflow.Step(stepCleanup,
+				francisworkflow.WithRun(h.cleanupCompleted),
+				francisworkflow.WithAttemptTimeout(rt.WorkflowTimeout),
+			),
+			// The image is freed before the event is delivered, which touches nothing in the store, so a slow or failing receiver doesn't keep the image busy
+			francisworkflow.Step(stepRelease,
+				francisworkflow.WithRun(h.release),
 				francisworkflow.WithOptional(),
 				francisworkflow.WithAttemptTimeout(rt.WorkflowTimeout),
 			),
-			francisworkflow.Step(stepCleanup,
-				francisworkflow.WithRun(h.cleanupCompleted),
+			francisworkflow.Step(stepNotify,
+				francisworkflow.WithRun(h.notify),
 				francisworkflow.WithInputFrom(stepManifest),
-				francisworkflow.WithAttemptTimeout(rt.WorkflowTimeout),
-			),
-			francisworkflow.Step(stepRelease,
-				francisworkflow.WithRun(h.release),
 				francisworkflow.WithOptional(),
 				francisworkflow.WithAttemptTimeout(rt.WorkflowTimeout),
 			),
@@ -140,7 +142,7 @@ func (w *jobWorkflowHandlers) snapshot(ctx context.Context, task francisworkflow
 		return nil, err
 	}
 
-	snap := jobSnapshot{StartedAt: time.Now()}
+	snap := jobSnapshot{StartedAt: time.Now().UTC()}
 
 	// The manifest is kept byte for byte, so a failed job can put back exactly what it found, even one written by an older version
 	content, err := w.runtime.Store.ReadManifestConsistent(ctx, namespace, imageID)
@@ -184,7 +186,7 @@ func (w *jobWorkflowHandlers) snapshot(ctx context.Context, task francisworkflow
 	return snap, nil
 }
 
-// Plan the fan-out: learn the source's size, reuse stored variants, skip the boxes another variant already holds, and cache the source only when encoding remains
+// Plan the fan-out: learn the source's size, reuse stored variants, skip the boxes another variant already holds, pick the file IDs of the rest, and cache the source only when encoding remains
 func (w *jobWorkflowHandlers) prepare(ctx context.Context, task francisworkflow.Task) (any, error) {
 	req, namespace, imageID, err := decodeRequest(task)
 	if err != nil {
@@ -248,15 +250,8 @@ func (w *jobWorkflowHandlers) prepare(ctx context.Context, task francisworkflow.
 		}
 	}
 
-	// Every encode learns which stored files the job keeps, so one that comes out at the same size and format can't replace a file another variant's manifest entry describes
-	reserved := reservedFiles(tasks)
-	if len(reserved) > 0 {
-		for i := range tasks {
-			if tasks[i].Skip == nil && tasks[i].Existing == nil {
-				tasks[i].Reserved = reserved
-			}
-		}
-	}
+	// The file IDs are part of this step's durable output, so every attempt of a variant writes the same key
+	assignFileIDs(tasks, previous, imagekeys.NewFileID)
 
 	// A cache miss only costs another download, so prefetching never prevents the durable fan-out from starting
 	if needsSource {
@@ -300,7 +295,7 @@ func (w *jobWorkflowHandlers) parsePrevious(ctx context.Context, content []byte,
 // Learn the size of the source after its EXIF orientation from the source's header
 func (w *jobWorkflowHandlers) sourceSize(ctx context.Context, namespace string, imageID uuid.UUID, format string) (imaging.Resolution, error) {
 	// Reading through the cache also leaves the source on disk for the variants that still need encoding
-	source, err := w.runtime.SourceCache.Read(ctx, namespace, imageID, format)
+	source, err := w.runtime.SourceCache.Get(ctx, namespace, imageID, format)
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrTooLarge) {
 		return imaging.Resolution{}, fmt.Errorf("%w: %w", imaging.ErrSourceUnreadable, err)
 	} else if err != nil {
@@ -315,6 +310,8 @@ func (w *jobWorkflowHandlers) sourceSize(ctx context.Context, namespace string, 
 }
 
 // Index the files of the previous manifest that still exist, which are the ones this job may reuse
+//
+// A file is found by the key its entry records, so the files stored under an older layout's names are reused too
 func (w *jobWorkflowHandlers) reusableVariants(ctx context.Context, namespace string, imageID uuid.UUID, previous *manifest.Manifest) (storedVariants, error) {
 	stored := storedVariants{
 		byBox:    make(map[variantIdentity]manifest.Variant),
@@ -330,28 +327,32 @@ func (w *jobWorkflowHandlers) reusableVariants(ctx context.Context, namespace st
 			continue
 		}
 
-		exists, existsErr := w.runtime.Store.VariantExists(ctx, namespace, imageID, entry.Width, entry.Height, entry.Format.Extension())
+		// A key outside the image's own objects is never trusted, so a manifest can't make the job list another image's file
+		if !w.runtime.Store.OwnsKey(namespace, imageID, entry.Key) {
+			continue
+		}
+		exists, existsErr := w.runtime.Store.VariantExists(ctx, entry.Key)
 		if existsErr != nil {
-			return storedVariants{}, fmt.Errorf("inspect existing variant %s: %w", entry.Name, existsErr)
+			return storedVariants{}, fmt.Errorf("inspect existing variant %s: %w", entry.Key, existsErr)
 		}
 		if !exists {
 			continue
 		}
 
 		fit := entry.Fit.OrDefault()
-		stored.byBox[variantIdentity{Format: entry.Format, Fit: fit, Width: entry.Resolution.Width, Height: entry.Resolution.Height}] = entry
-		stored.byOutput[variantIdentity{Format: entry.Format, Fit: fit, Width: entry.Width, Height: entry.Height}] = entry
+		stored.byBox[variantIdentity{Format: entry.Format, Fit: fit, Quality: entry.Quality, Width: entry.Resolution.Width, Height: entry.Resolution.Height}] = entry
+		stored.byOutput[variantIdentity{Format: entry.Format, Fit: fit, Quality: entry.Quality, Width: entry.Width, Height: entry.Height}] = entry
 	}
 	return stored, nil
 }
 
 // Find a stored file for a variant: the one its own box requested, or, for a box the source can't fill, any file with the same full-resolution pixels
-// Quality and effort aren't compared, so a stored file is reused even when the encoder settings have changed since
+// The quality has to match, since another quality is another picture, while the effort isn't compared: it only traded encoding time for file size
 func (s storedVariants) lookup(source imaging.Resolution, spec VariantSpec) (manifest.Variant, bool) {
 	fit := spec.Fit.OrDefault()
 	full, isFull := imaging.FullResolution(source, spec.Resolution, fit)
 
-	entry, found := s.byBox[variantIdentity{Format: spec.Format, Fit: fit, Width: spec.Resolution.Width, Height: spec.Resolution.Height}]
+	entry, found := s.byBox[variantIdentity{Format: spec.Format, Fit: fit, Quality: spec.Quality, Width: spec.Resolution.Width, Height: spec.Resolution.Height}]
 	if found && (!isFull || (entry.Width == full.Width && entry.Height == full.Height)) {
 		return entry, true
 	}
@@ -359,13 +360,13 @@ func (s storedVariants) lookup(source imaging.Resolution, spec VariantSpec) (man
 		return manifest.Variant{}, false
 	}
 
-	// Any file of this fit and format at the full-resolution size holds the same pixels, whichever box asked for it
-	entry, found = s.byOutput[variantIdentity{Format: spec.Format, Fit: fit, Width: full.Width, Height: full.Height}]
+	// Any file of this fit, format and quality at the full-resolution size holds the same pixels, whichever box asked for it
+	entry, found = s.byOutput[variantIdentity{Format: spec.Format, Fit: fit, Quality: spec.Quality, Width: full.Width, Height: full.Height}]
 	return entry, found
 }
 
-// Plan which variants are skipped because a tighter box of the same fit and format already holds their pixels
-// A box the source can't fill gets the source's own pixels, so every such box of one fit and format comes out the same: only the tightest stores a file, and the others point at it
+// Plan which variants are skipped because a tighter box of the same fit, format and quality already holds their pixels
+// A box the source can't fill gets the source's own pixels, so every such box of one fit, format and quality comes out the same: only the tightest stores a file, and the others point at it
 func planSkips(source imaging.Resolution, specs []VariantSpec) []*SkippedVariant {
 	skips := make([]*SkippedVariant, len(specs))
 
@@ -379,7 +380,7 @@ func planSkips(source imaging.Resolution, specs []VariantSpec) []*SkippedVariant
 			continue
 		}
 
-		group := variantIdentity{Format: spec.Format, Fit: fit, Width: full.Width, Height: full.Height}
+		group := variantIdentity{Format: spec.Format, Fit: fit, Quality: spec.Quality, Width: full.Width, Height: full.Height}
 		groups[i] = &group
 		holder, found := holders[group]
 		if !found || imaging.ScaleFactor(source, spec.Resolution, fit) < imaging.ScaleFactor(source, specs[holder].Resolution, fit) {
@@ -401,21 +402,32 @@ func planSkips(source imaging.Resolution, specs []VariantSpec) []*SkippedVariant
 	return skips
 }
 
-// List the stored files the planned variants reuse, once each
-func reservedFiles(tasks []variantTask) []reservedFile {
-	var reserved []reservedFile
-	for _, task := range tasks {
-		if task.Existing == nil {
+// Give every variant that encodes a file ID no file of the image uses, so the file it stores is a new object
+// The IDs in use are the ones the previous manifest lists and the ones the job already handed out
+// The store can't list an image's files, so a file no manifest lists any more isn't checked, but sharing its key would also take the same size and format
+func assignFileIDs(tasks []variantTask, previous *manifest.Manifest, newID func() string) {
+	used := make(map[string]struct{}, len(tasks))
+	if previous != nil {
+		for _, entry := range previous.Variants {
+			used[imagekeys.FileIDOf(entry.Key)] = struct{}{}
+		}
+	}
+
+	for i := range tasks {
+		if tasks[i].Skip != nil || tasks[i].Existing != nil {
 			continue
 		}
 
-		// Two variants can reuse the same file, which only needs to be reserved once
-		_, found := variantTask{Reserved: reserved}.reservedAt(task.Existing.Width, task.Existing.Height, task.Existing.Format)
-		if !found {
-			reserved = append(reserved, reservedFile{Name: task.Spec.Name, Stored: *task.Existing})
+		// A taken ID is drawn again, which with 32 random bits almost never happens
+		id := newID()
+		_, taken := used[id]
+		for taken {
+			id = newID()
+			_, taken = used[id]
 		}
+		used[id] = struct{}{}
+		tasks[i].FileID = id
 	}
-	return reserved
 }
 
 // Build and store the manifest from the fan-out's durable outputs
@@ -462,7 +474,6 @@ func (w *jobWorkflowHandlers) writeManifest(ctx context.Context, task franciswor
 	// The fan-out is fail-fast, so every durable output belongs to a variant that was stored successfully
 	for i := range results {
 		results[i].Index = i
-		results[i].Name = tasks[i].Spec.Name
 	}
 
 	m, err := buildManifest(imagekeys.New(), req, snap, tasks[0].SourceSize, results)
@@ -597,9 +608,7 @@ func (w *jobWorkflowHandlers) cleanupCompleted(ctx context.Context, task francis
 	}
 
 	w.removeSource(ctx, req.JobID, namespace, imageID)
-	if w.runtime.Metrics != nil {
-		w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusCompleted))
-	}
+	w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusCompleted))
 	w.runtime.Log.InfoContext(ctx, "Job completed",
 		slog.String("jobId", req.JobID),
 		slog.Int("variants", len(req.Variants)),
@@ -639,10 +648,12 @@ func (w *jobWorkflowHandlers) releaseImage(ctx context.Context, req JobRequest) 
 	if err != nil {
 		return time.Time{}, nil //nolint:nilerr
 	}
-	return result.FinishedAt, nil
+
+	// Francis decodes the actor's answer in the local zone, and the event carries its times in UTC
+	return result.FinishedAt.UTC(), nil
 }
 
-// Clean up when a job fails: free the image, report the failure, and remove the local source
+// Clean up when a job fails: remove the local source, free the image, and report the failure
 //
 // It is the compensation of the first step, so it runs last, once every other effect of the job has been undone and the manifest put back
 func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation francisworkflow.Compensation) error {
@@ -651,13 +662,15 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 		return err
 	}
 
-	// The image is freed first, so a failure event that can't be delivered doesn't hold up the image's next job
+	// The local source goes before the image is freed, so it can't remove a copy the image's next job just downloaded
+	w.removeSource(ctx, req.JobID, namespace, imageID)
+
+	// The image is freed before the event is delivered, so a failure event that can't be delivered doesn't hold up the image's next job
 	finishedAt, err := w.releaseImage(ctx, req)
 	if err != nil {
 		w.runtime.Log.WarnContext(ctx, "Failed to release the image of a failed job; the image actor will notice on its own", slog.String("jobId", req.JobID), slog.Any("error", err))
 	}
 
-	w.removeSource(ctx, req.JobID, namespace, imageID)
 	cause := failureMessage(compensation.Cause())
 
 	// The failure event carries the manifest the image is left with, which is the one the job found
@@ -691,9 +704,7 @@ func (w *jobWorkflowHandlers) cleanupFailed(ctx context.Context, compensation fr
 		}
 	}
 
-	if w.runtime.Metrics != nil {
-		w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusFailed))
-	}
+	w.runtime.Metrics.RecordJobCompleted(ctx, string(StatusFailed))
 	w.runtime.Log.InfoContext(ctx, "Job failed",
 		slog.String("jobId", req.JobID),
 		slog.String("error", cause),
@@ -776,10 +787,6 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 	m.CompletedAt = snap.StartedAt
 	m.Variants = make([]manifest.Variant, len(req.Variants))
 
-	key := func(width int, height int, format imaging.Format) string {
-		return layout.AssetKey(req.Namespace, imageID, width, height, format.Extension())
-	}
-
 	// Describe every variant that owns a file first, because a skipped one repeats the file of the variant that holds its pixels
 	for i, spec := range req.Variants {
 		result := results[i] //nolint:gosec // Result and request counts are required to match above
@@ -791,9 +798,11 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 			continue
 		case result.Reused != nil:
 			m.Variants[i] = reusedEntry(spec, *result.Reused)
+		case result.Key == "":
+			return manifest.Manifest{}, fmt.Errorf("variant %d was encoded, but its result records no key", i)
 		default:
 			m.Variants[i] = manifest.Variant{
-				Name:       spec.Name,
+				Key:        result.Key,
 				Format:     spec.Format,
 				Quality:    spec.Quality,
 				Effort:     spec.Effort,
@@ -804,7 +813,6 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 				Size:       result.Size,
 			}
 		}
-		m.Variants[i].Key = key(m.Variants[i].Width, m.Variants[i].Height, m.Variants[i].Format)
 	}
 
 	// A skipped entry repeats its holder's file, so a reader that doesn't know about skipped entries sees a duplicate of that file
@@ -822,7 +830,6 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 		skippedFor := skip.For
 		m.Variants[i] = manifest.Variant{
 			Key:        holder.Key,
-			Name:       spec.Name,
 			Format:     spec.Format,
 			Quality:    holder.Quality,
 			Effort:     holder.Effort,
@@ -836,41 +843,14 @@ func buildManifest(layout imagekeys.Layout, req JobRequest, snap jobSnapshot, so
 		}
 	}
 
-	// Boxes that differ can still come out at the same size for a given source, and then their variants are one file that only one encoding can be stored as
-	err = checkSharedFiles(m.Variants)
-	if err != nil {
-		return manifest.Manifest{}, err
-	}
-
 	return m, nil
 }
 
-// Check that the entries describing the same file agree on how it was encoded
-// A skipped entry repeats its holder's settings, so only the entries that own a file are compared
-func checkSharedFiles(variants []manifest.Variant) error {
-	owners := make(map[string]manifest.Variant, len(variants))
-	for _, entry := range variants {
-		if entry.Skipped {
-			continue
-		}
-
-		owner, found := owners[entry.Key]
-		if !found {
-			owners[entry.Key] = entry
-			continue
-		}
-		if owner.Quality != entry.Quality || owner.Effort != entry.Effort {
-			return fmt.Errorf("variants '%s' (quality %d, effort %d) and '%s' (quality %d, effort %d) both come out as the %dx%d%s file, which can only be stored with one set of encoder settings: give them the same quality and effort", owner.Name, owner.Quality, owner.Effort, entry.Name, entry.Quality, entry.Effort, entry.Width, entry.Height, entry.Format.Extension())
-		}
-	}
-	return nil
-}
-
-// Describe a reused file with the metadata of the encoding that stored it, under the name and box this job asked for
+// Describe a reused file with the key and metadata of the encoding that stored it, under the name and box this job asked for
 // The box can differ from the stored one when a box the source can't fill reuses the full-resolution file another box stored
 func reusedEntry(spec VariantSpec, stored manifest.Variant) manifest.Variant {
 	return manifest.Variant{
-		Name:       spec.Name,
+		Key:        stored.Key,
 		Format:     stored.Format,
 		Quality:    stored.Quality,
 		Effort:     stored.Effort,
