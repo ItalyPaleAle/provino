@@ -14,6 +14,8 @@ provino is a high-performance HTTP service that stores the images your users upl
 
 provino never makes a variant larger than its source, reuses the variants that are already stored when a set changes, and detects every upload's format from its content rather than its name.
 
+> I built provino, among other things, as a showcase of what's possible with the [Francis](https://gofrancis.dev) actor framework. Francis helps building apps that implement durable actors and workflows, that scale up as well as down to a single replica.
+
 ## How it works
 
 ```mermaid
@@ -122,6 +124,10 @@ CORS is available on public routes to cross-origin requests, from the origins in
   - [Docker Compose and Podman](deploy/README.md): a single instance on one host
   - [Helm chart](helm/README.md): Kubernetes, with one replica or several
 - [Configuration reference](config.md), and an annotated [sample](config.sample.yaml)
+
+## AI disclosure
+
+provino was built with significant assistance from AI tools.
 
 ## License
 
