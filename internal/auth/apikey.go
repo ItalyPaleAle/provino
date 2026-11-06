@@ -21,7 +21,9 @@ type apiKey struct {
 
 // NewAPIKeys creates the authenticator from keys the configuration has already validated
 func NewAPIKeys(keys []config.ConfigAPIKey) *APIKeys {
-	a := &APIKeys{keys: make([]apiKey, 0, len(keys))}
+	a := &APIKeys{
+		keys: make([]apiKey, 0, len(keys)),
+	}
 	for _, key := range keys {
 		// Validation guarantees a well-formed digest
 		digest, _ := hex.DecodeString(key.Digest())

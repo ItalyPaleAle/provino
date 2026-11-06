@@ -127,10 +127,10 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 	}
 
 	// Francis owns placement and shares this strict per-host budget across every worker queue in the workflow
-	// The cap is sized for encodes, which are the expensive step; the other steps draw from the same budget
+	// The cap is sized for encodes, which are the expensive step
 	maxConcurrentEncodes := cfg.Images.MaxConcurrentEncodes
 	if maxConcurrentEncodes == 0 {
-		// GOMAXPROCS rather than NumCPU, because it follows a container's CPU limit while NumCPU counts every core of the machine
+		// GOMAXPROCS follows a container's CPU limit
 		maxConcurrentEncodes = runtime.GOMAXPROCS(0)
 	}
 
@@ -225,7 +225,7 @@ func (h *Host) Run(ctx context.Context) error {
 
 	err := h.host.Run(ctx)
 
-	// Stopping the janitor is what the cancel above does
+	// Cancel the context to stop the janitor
 	// Waiting for it keeps it from outliving the call that started it
 	cancel()
 	wg.Wait()

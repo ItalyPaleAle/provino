@@ -263,6 +263,7 @@ func (a *imageActor) startJob(ctx context.Context, req JobRequest) (startResult,
 	if err != nil {
 		return startResult{}, err
 	}
+
 	return startResult{JobID: req.JobID}, nil
 }
 
@@ -304,6 +305,7 @@ func (a *imageActor) claim(ctx context.Context, req claimRequest) (claimResult, 
 	if err != nil {
 		return claimResult{}, err
 	}
+
 	return claimResult{Claimed: true}, nil
 }
 
@@ -319,6 +321,7 @@ func (a *imageActor) release(ctx context.Context, token string) error {
 		return nil
 	}
 	state.Upload = nil
+
 	return a.save(ctx, &state)
 }
 
@@ -345,6 +348,7 @@ func (a *imageActor) finished(ctx context.Context, jobID string) (finishedResult
 	if err != nil {
 		return finishedResult{}, err
 	}
+
 	return finishedResult{FinishedAt: finishedAt}, nil
 }
 
@@ -374,6 +378,7 @@ func (a *imageActor) heal(ctx context.Context, state *imageState) (bool, error) 
 		slog.Bool("found", found),
 	)
 	a.finishActive(state)
+
 	return true, nil
 }
 
@@ -415,6 +420,7 @@ func (a *imageActor) activate(ctx context.Context, state *imageState, req JobReq
 	if err != nil {
 		return fmt.Errorf("failed to start the job: %w", err)
 	}
+
 	return nil
 }
 

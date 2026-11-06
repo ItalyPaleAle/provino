@@ -92,6 +92,7 @@ func (s *Set) Authenticate(ctx context.Context, r *http.Request) (Principal, err
 	if s.jwt == nil {
 		return Principal{}, fmt.Errorf("%w: JWTs are not enabled", ErrUnauthorized)
 	}
+
 	return s.jwt.Verify(ctx, token, time.Now())
 }
 

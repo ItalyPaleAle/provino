@@ -72,6 +72,7 @@ func (s *jobService) start(ctx context.Context, req JobRequest) error {
 	if err != nil {
 		return fmt.Errorf("failed to start the workflow of job '%s': %w", req.JobID, err)
 	}
+
 	if created {
 		s.runtime.Metrics.RecordJobStarted(ctx, len(req.Variants))
 	}
@@ -87,6 +88,7 @@ func (s *jobService) instanceStatus(ctx context.Context, namespace string, image
 	} else if err != nil {
 		return francisworkflow.InstanceStatus{}, false, fmt.Errorf("failed to read the workflow of job '%s': %w", jobID, err)
 	}
+
 	return status, true, nil
 }
 
@@ -147,6 +149,7 @@ func (h *hostJobs) ClaimUpload(ctx context.Context, namespace string, imageID st
 	if err != nil {
 		return false, fmt.Errorf("failed to decode the claim: %w", err)
 	}
+
 	return result.Claimed, nil
 }
 
@@ -155,6 +158,7 @@ func (h *hostJobs) ReleaseUpload(ctx context.Context, namespace string, imageID 
 	if err != nil {
 		return fmt.Errorf("failed to release the image ID: %w", err)
 	}
+
 	return nil
 }
 

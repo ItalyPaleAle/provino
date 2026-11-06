@@ -1,35 +1,43 @@
 # Jobs: the image actor and the job workflow
 
-Everything provino does after accepting a request runs as a job: every upload (from a browser or a backend) and every optimize request becomes one, with or without variants. Each job runs as a [Francis workflow](https://gofrancis.dev/workflows/), and the jobs of one image run one at a time.
+Every upload (from a browser or a backend) and every optimize request runs as a job, with or without variants. Each job is a [Francis workflow](https://gofrancis.dev/workflows/), and an image runs one job at a time.
 
-Francis owns the actors, the workflow journal, retries, deadlines, retention and purging. provino declares the image actor and the workflow graph, and supplies idempotent handlers for the work itself.
+Francis owns the actors, the workflow journal, retries, deadlines, retention and purging. provino declares the image actor and the workflow graph, and supplies idempotent handlers for the work.
 
 ## The image actor
 
-Every job writes its image's manifest, and a failed job puts back the manifest it found, so two jobs of one image running at once would undo each other's work. Francis has no way to keep a workflow to one running instance per key, so the `provino-image` actor, addressed as `<namespace>:<imageId>`, does it: it starts a job's workflow only when no other job of the image is running, and refuses the job otherwise. A refused job isn't kept anywhere: the caller gets `409 image_busy` and sends it again once the image is free. Francis forbids `/` in actor IDs, and a namespace can't contain `:`, so the two parts never run into each other.
+Every job writes its image's manifest, and a failed job restores the manifest it found, so two concurrent jobs of one image would undo each other's work. Francis can't limit a workflow to one running instance per key, so the `provino-image` actor does it: it starts a job only when the image has no other active job. A refused job isn't queued; the caller gets `409 image_busy` and retries once the image is free.
 
-Its state is the active job, a short history of finished jobs, and the claim of an upload that is storing the image. It has five methods and an alarm:
+The actor's ID is `<namespace>:<imageId>` (Francis forbids `/` in actor IDs, and namespaces can't contain `:`). Its state holds the active job, a short history of finished jobs, and the claim of an upload that is storing the image.
 
 | Method | What it does |
 | --- | --- |
-| `start` | Refuses a job while another job of the image is active. It also refuses a job without an upload's `source` while an upload holds the claim, since the original isn't stored yet and the job would fail with `image_not_found`; the upload's own job carries `source`. Otherwise it mints a UUIDv7 job ID, records the job as active, and starts its workflow. A job whose workflow can't be started isn't accepted, so the caller finds out at once |
-| `finished` | Called by the workflow when it ends, it moves the active job to the history, which frees the image for its next job. A call about a job that isn't active is a repeat, and changes nothing |
-| `claim` | Holds the image's ID for an upload that named it, until the upload releases it or the claim expires (`server.readTimeout` plus a minute). It refuses when another upload holds the ID, or when a job of the image is active. The upload checks that nothing is stored for the ID only once it holds the claim, which is what keeps two uploads of the same ID from both passing that check |
-| `release` | Gives up the claim an upload holds, once its job has started or the upload failed. A release from an upload that doesn't hold the claim changes nothing |
-| `job` | A read-only peek, which reports whether a job is active or recently finished, along with the hash of the subject that started it |
-| The `check` alarm | The safety net. While a job is active it fires every minute, and at the latest after the job's deadline. It also fires when a claim expires, and when the oldest history entry expires. With `actors.completedWorkflowRetention` at `0` the history never expires, so an image with nothing active or claimed has no alarm at all; if the retention changes later, its history is pruned the next time the image gets a job or a claim |
+| `start` | Refuses the job if another job is active, or if an upload holds the claim and the job has no `source`: only the upload's own job carries `source`, and any other would fail with `image_not_found` because the original isn't stored yet. Otherwise it mints a UUIDv7 job ID, records the job as active, and starts its workflow. If the workflow can't be started, the job isn't accepted and the caller gets the error. |
+| `finished` | Called by the workflow when the job ends. Moves the active job to the history, which frees the image. A call for a job that isn't active is a repeat and changes nothing. |
+| `claim` | Reserves the image ID for an upload that named it, until the upload releases it or the claim expires (`server.readTimeout` plus a minute). Refused when another upload holds the claim or a job is active. The upload checks that nothing is stored under the ID only after it holds the claim, so two uploads of one ID can't both pass the check. |
+| `release` | Drops the upload's claim once its job has started or the upload failed. A release from an upload that doesn't hold the claim changes nothing. |
+| `job` | Read-only. Reports whether a job is active or recently finished, with the hash of the subject that started it. |
+| `check` (alarm) | While a job is active, fires every minute and no later than a minute past the job's deadline. Also fires when a claim expires and when the oldest history entry expires. With `actors.completedWorkflowRetention` at `0` the history never expires, so an image with nothing active or claimed has no alarm; if the retention changes later, the history is pruned on the image's next `start` or `claim`. |
 
-The actor schedules its alarm, then records a job as active, and only then starts its workflow. Starting the workflow first would risk one running without the actor knowing, and then nothing would stop the next job from racing it. `heal` runs on every `start`, `claim` and alarm, and reads the active job's journal: while the workflow exists and hasn't ended, the image stays busy, and otherwise the job is freed. Francis reports a workflow that was started but isn't running yet as `pending`, so one that doesn't exist was either never started or already purged, and either way the job is over. A job is recorded as active only on its way to being started, so one whose workflow never started belongs to a `start` that failed or never returned, and its caller was told so; for an upload, the original is already deleted. A failed start leaves the job active, because Francis may have recorded it before failing, and the next `heal` keeps or frees the image depending on whether the workflow exists. If the process dies before the start, the alarm is already there to free the image. A `start` or `claim` that is refused saves the state only when `heal` changed it, so a caller retrying against a busy image doesn't cost a write each time.
+### Starting and recovering jobs
 
-The image stays busy until the job's `release` step, which comes before `notify`, so a slow or failing webhook receiver doesn't keep the image busy: delivering an event touches nothing in the store. The cost is that the events of two jobs of one image that run back to back can arrive out of order, which the event's `timestamp` lets a receiver sort out. Polling the active job every minute is what bounds a lost release: if the `release` step gives up, the image is freed at the next check rather than at the job's deadline.
+`start` schedules the alarm, records the job as active, and only then starts the workflow. In the opposite order, a crash could leave a workflow running that the actor doesn't know about, and the next job would race it. If the process stops before the workflow starts, the alarm frees the image.
 
-The history keeps the subject hash of finished jobs for as long as their journal is retained (`actors.completedWorkflowRetention`, and at most 50 jobs), so a browser can read the status of its own jobs after they finish. An image with nothing active, remembered or claimed deletes its state, so the actors of every image ever uploaded don't accumulate.
+`heal` runs on every `start`, `claim` and alarm. It keeps the image busy while the active job's workflow exists and hasn't ended, and frees it otherwise. Francis reports a started workflow that isn't running yet as `pending`, so a missing workflow either never started or was already purged. One that never started belongs to a `start` that failed or never returned, whose caller already got an error (an upload has also deleted its original by then). A failed start still leaves the job active, because Francis may have recorded the workflow before the error, and `heal` frees the image only once the workflow is confirmed missing.
+
+A refused `start` or `claim` saves state only when `heal` changed it, so retries against a busy image don't each cost a write.
+
+### Release, history and cleanup
+
+The `release` step frees the image before `notify` runs, so a slow or failing webhook receiver doesn't hold up the next job (delivering an event doesn't touch the store). The trade-off is that events from two back-to-back jobs of one image can arrive out of order; receivers can order them by `timestamp`.
+
+The history keeps the subject hash of up to 50 finished jobs for as long as their journals are retained (`actors.completedWorkflowRetention`), so a browser can read the status of its own jobs after they finish. An actor with no active job, history or claim deletes its state, so actors don't accumulate for every image ever uploaded.
 
 ## Workflow definition
 
-The workflow is named `provino-job`, and its definition version is explicit. Any change to the graph or its policies that affects the definition fingerprint must also increment `jobWorkflowVersion`.
+The workflow is named `provino-job` and has an explicit definition version. Any change to the graph or its policies that changes the definition fingerprint must also increment `jobWorkflowVersion`.
 
-A job's workflow instance ID is `<namespace>:<imageId>:<jobId>`. Binding the instance to its image means a status lookup built from a URL can only ever find a job under the image it belongs to.
+A job's instance ID is `<namespace>:<imageId>:<jobId>`, so a status lookup built from a URL can only find jobs of that image.
 
 ```mermaid
 flowchart LR
@@ -42,7 +50,7 @@ flowchart LR
     RELEASE["release<br/>optional, free the image"] --> NOTIFY
     NOTIFY["notify<br/>optional webhook"] --> DONE(["completed"])
     GENERATE -. task fails .-> UNDO_GENERATE["compensate generate<br/>delete the files the job created"]
-    MANIFEST -. step fails .-> UNDO_MANIFEST["compensate manifest<br/>put back the manifest the job found"]
+    MANIFEST -. step fails .-> UNDO_MANIFEST["compensate manifest<br/>restore the manifest the job found"]
     UNDO_MANIFEST --> UNDO_GENERATE
     UNDO_GENERATE --> UNDO_SNAPSHOT["compensate snapshot<br/>remove local source, free the image, send image.failed"]
     SNAPSHOT -. step fails .-> UNDO_SNAPSHOT
@@ -51,73 +59,77 @@ flowchart LR
 
 | Step | Francis node | Responsibility |
 | --- | --- | --- |
-| `snapshot` | Plain step, compensated also when it fails | Reads the image's manifest byte for byte, so a failed job can put back exactly what it found. It works out the original's format, size and dimensions: from what the upload measured, else from the manifest, else from the request's `sourceFormat`. It then checks the original exists. A missing original, or an image with no manifest and no `sourceFormat`, fails the job permanently with `image_not_found`. |
-| `prepare` | Plain step | Returns no items for a job without variants. Otherwise it learns the source's size (from the snapshot or the source's header) and marks two kinds of variant. A box the source can't fill is skipped when a tighter box of the same fit, format and quality produces the same file, and a variant whose manifest entry and stored file still match is reusable. Every other variant gets a random file ID. It prefetches the source only when something is left to encode. |
-| `generate` | `ForEach` with `FailFast` and task compensation | Returns at once for a skipped item, returns stored metadata for a reusable one, or has libvips encode one variant from the source's path in the local cache, stores it at a key named after the size it came out at and the item's file ID, and returns a `VariantResult` with that key. An empty fan-out completes on its own. |
-| `manifest` | Required step, compensated also when it fails | Builds the `provino/v1` manifest from the durable outputs, with the full object key of every file, and writes it. A job without variants writes nothing, because the upload already stored the manifest, and returns the manifest it found. This step is the workflow's output. |
-| `cleanup` | Step that can't fail | Removes this host's cached source and records the outcome metric. It runs before `release`, so it can't remove a copy of the source the image's next job just downloaded. |
-| `release` | Optional step | Tells the image's actor the job is done, which frees the image for its next job. If it can't, the actor's alarm notices on its own, within a minute. |
-| `notify` | Optional step, reading the `manifest` output | Delivers `image.stored` (no variants) or `image.optimized` to the endpoint the job resolved when it was requested. Exhausted retries are recorded by Francis and don't fail the job. The image is already free while it runs. |
+| `snapshot` | Plain step, compensated even when it fails | Reads the image's manifest byte for byte, so a failed job can restore it exactly. Takes the original's format, size and dimensions from the upload's measurements, else the manifest, else the request's `sourceFormat`, then checks that the original exists. A missing original, or no manifest and no `sourceFormat`, fails the job permanently with `image_not_found`. |
+| `prepare` | Plain step | Returns no items for a job without variants. Otherwise it reads the source's size (from the snapshot or the file header), marks variants to skip or reuse (see [Never enlarging](#never-enlarging) and [Variant keys and reuse](#variant-keys-and-reuse)), and draws a random file ID for every other variant. Prefetches the source only if something needs encoding. |
+| `generate` | `ForEach` with `FailFast` and task compensation | Returns immediately for a skipped item and returns the stored metadata for a reusable one. Otherwise it encodes the variant with libvips from the cached source's path, stores it under a key built from its output size and file ID, and returns a `VariantResult` with that key. An empty fan-out completes on its own. |
+| `manifest` | Required step, compensated even when it fails | Builds the `provino/v1` manifest from the journaled outputs, with the full object key of every file, and writes it. A job without variants writes nothing (the upload already stored the manifest) and returns the manifest it found. Its output is the workflow's output. |
+| `cleanup` | Step that can't fail | Removes this host's cached source and records the outcome metric. It runs before `release`, so it can't remove a copy of the source that the image's next job just downloaded. |
+| `release` | Optional step | Tells the image's actor the job finished, which frees the image. If it can't, the actor's next check frees the image within a minute rather than at the job's deadline. |
+| `notify` | Optional step, reading the `manifest` output | Delivers `image.stored` (no variants) or `image.optimized` to the endpoint resolved when the job was requested. Francis records exhausted retries, and they don't fail the job. |
 
-Every step after `manifest` is optional or can't fail, so a job whose variants are stored never unwinds them because a notification or a local cleanup went wrong.
+Every step after `manifest` is optional or can't fail, so a failed notification or cleanup never unwinds stored variants.
 
-The job service maps Francis' journal onto the job status: a running, suspended or compensating instance reads as `running`, as does an active job whose journal doesn't exist yet, a completed instance as `completed`, and a failed or cancelled one as `failed`, with its cause as the error.
+The job service maps Francis' journal to the job status: running, suspended and compensating instances are `running` (as is an active job with no journal yet), completed ones are `completed`, and failed or cancelled ones are `failed`, with the cause as the error.
 
 ## Durable data flow
 
-The complete `JobRequest` is the instance input. `snapshot` returns a `jobSnapshot`, which the later steps read through `WithInputFrom` (compensations included). `prepare` returns an ordered array of `variantTask` values that sizes the fan-out. Francis journals every successful task output in the same order, so `manifest` combines each result with its spec without any state of its own.
+The instance input is the full `JobRequest`. `snapshot` returns a `jobSnapshot`, which later steps and compensations read through `WithInputFrom`. `prepare` returns an ordered array of `variantTask` values that sizes the fan-out. Francis journals successful task outputs in the same order, so `manifest` pairs each result with its spec without keeping state of its own.
 
-The manifest's timestamps come only from durable values. `StartedAt` comes from the snapshot, and `CompletedAt` is the latest result time, so a retried manifest step writes the same bytes.
+Manifest timestamps come only from durable values: `StartedAt` from the snapshot and `CompletedAt` from the latest result, so a retried `manifest` step writes the same bytes.
 
 ## Never enlarging
 
-No variant is larger than its source. A box the source can't fill gets the source's own pixels: the whole source with `contain`, or with `cover` the largest centered crop of the box's shape, which `imaging.FullResolution` computes. Every such box of one fit, format and quality produces the same file, so `prepare` keeps only the tightest, by `imaging.ScaleFactor`, and skips the others. The encoder enforces the same rule on its own.
+No variant is larger than its source. When the source can't fill a box, the variant uses the source at full resolution: the whole image for `contain`, or for `cover` the largest centered crop with the box's aspect ratio (computed by `imaging.FullResolution`). All such boxes with the same fit, format and quality produce the same file, so `prepare` keeps only the tightest one (by `imaging.ScaleFactor`) and skips the rest. The encoder enforces the same rule independently.
 
-A box the source can't fill may reuse a stored file of another box when that file has the same fit, format, quality and full-resolution size.
+Such a box can also reuse another box's stored file with the same fit, format, quality and full-resolution size.
 
 ## Variant keys and reuse
 
-A variant is stored at a key that names the size it came out at and ends with a random file ID (`imagekeys.AssetKey`), such as `<imageId>_600x400_3f9a0c1e.webp`. `prepare` draws the file ID of every variant that encodes, and draws again when the previous manifest or another variant of the job already uses it (`assignFileIDs`). The ID is part of `prepare`'s journaled output, and the size is known only once the variant is encoded, so `generate` builds the key and returns it in its result, where `manifest` and the compensation read it. So:
+Each variant is stored under a key with its output size and a random file ID (`imagekeys.AssetKey`), such as `<imageId>_600x400_3f9a0c1e.webp`. `prepare` draws a file ID for every variant it will encode, and redraws when the previous manifest or another variant of the job already uses it (`assignFileIDs`). The ID is journaled in `prepare`'s output, but the size is known only after encoding, so `generate` builds the key and returns it in its result for `manifest` and the compensation to read.
 
-- Every file a job encodes is a new object. A job never writes over a file the previous manifest lists, so a failed job that puts that manifest back leaves every file it lists holding the bytes it describes, and a key's bytes never change, so applications can serve variants as immutable.
-- Two variants that come out at the same size, such as `600x600` and `600xauto` for a 3:2 source, are two files, each with its own settings.
-- A variant asked for at another quality is encoded again, into a new file, and the old file stays in the store.
-- The store can't list an image's files, so a file no manifest lists any more isn't checked when a file ID is drawn. Sharing its key would also take the same size and format, and a 1 in 4 billion draw.
+As a result:
 
-`prepare` finds reusable files by the key each entry of the previous manifest records, and only when that key belongs to the image (`imagekeys.OwnsKey`) and the file exists. A stored entry is reused for a variant of the same box, fit, format and quality, whatever its effort. Since the key comes from the manifest, files stored under an older layout's names, such as `<imageId>_600x400.webp`, are reused as they are.
+- Every file a job encodes is a new object. A job never overwrites a file the previous manifest lists, so restoring that manifest after a failure leaves every listed file with the bytes it describes. A key's bytes never change, so applications can serve variants as immutable.
+- Two variants with the same output size, such as `600x600` and `600xauto` for a 3:2 source, are separate files with their own settings.
+- A variant requested at a different quality is encoded into a new file, and the old file stays in the store.
+- The store can't list an image's files, so the ID draw doesn't check files that no manifest lists anymore. A collision with one would also need the same size and format, on top of a 1 in 4 billion draw.
+
+`prepare` finds reusable files through the keys in the previous manifest, and reuses one only if the key belongs to the image (`imagekeys.OwnsKey`) and the file exists. An entry is reused for a variant with the same box, fit, format and quality, regardless of effort. Because keys come from the manifest, files stored under older names such as `<imageId>_600x400.webp` are reused as they are.
 
 ## Idempotency
 
-Workflow tasks are delivered at least once, so every handler stays idempotent:
+Workflow tasks are delivered at least once, so every handler is idempotent:
 
-- Starting a job twice finds the instance its job ID names and discards the second start.
+- A second start of a job finds the instance its job ID names and is discarded.
 - `snapshot` only reads.
-- Planning depends only on the source's size and the requested set, and an original never changes once stored, so a retried `prepare` plans the same work. It may draw other file IDs, but nothing uses them before its output is journaled.
-- A retried variant encodes the same source to the same size, with the file ID from `prepare`'s output, so it overwrites the same key.
-- A retried manifest step writes the same document to the same key.
-- Compensations are safe to repeat: deleting a missing object succeeds, and restoring the manifest writes the same bytes.
-- `finished` ignores a job that isn't the active one, so a repeated release changes nothing.
-- Delivery IDs are derived from the job ID and the event type, so a receiver can tell a retry from a new event.
-- Source removal is safe to repeat, and the cache sweeper removes the files a host left behind.
+- `prepare` plans from the source's size and the requested set, and a stored original never changes, so a retry plans the same work. It may draw different file IDs, but nothing uses them until its output is journaled.
+- A retried variant encodes the same source to the same size with the file ID from `prepare`'s output, so it overwrites the same key.
+- A retried `manifest` step writes the same document to the same key.
+- Compensations can repeat: deleting a missing object succeeds, and restoring the manifest writes the same bytes.
+- `finished` ignores a job that isn't active, so a repeated release changes nothing.
+- Delivery IDs derive from the job ID and the event type, so a receiver can tell a retry from a new event.
+- Removing the cached source can repeat, and the cache sweeper removes files a host left behind.
 
 ## Failures and compensation
 
-A failed job leaves the image as it found it:
+A failed job leaves the image as it found it. Compensations run in reverse step order:
 
-1. `generate`'s compensation deletes the file each encoded variant stored, at the key its result records, after checking that the key belongs to the image. Every such file is new, so nothing another job or an application references is deleted, while reused and skipped variants stored nothing. An attempt that stored its file and then failed, and was never retried to completion, leaves that file behind, and keeping an orphaned file is the harmless mistake.
-2. `manifest`'s compensation, which also runs when the step itself failed partway, puts back the manifest the job found, or removes it when there was none.
-3. `snapshot`'s compensation runs last. It removes the local source, then frees the image before delivering anything, so a failure event that can't be delivered doesn't hold up the next job. It then delivers `image.failed`, carrying the manifest the image is left with. It tries the delivery up to five times and then gives up, so an unreachable endpoint can't stall the unwind.
+1. `manifest`'s compensation, which also runs when the step itself failed partway, restores the manifest the job found, or deletes it if there was none.
+2. `generate`'s compensation deletes the file each encoded variant stored, at the key in its result, after checking that the key belongs to the image. Every such file is new, so nothing another job or an application references is deleted; reused and skipped variants stored nothing. An attempt that stored its file and then failed without a successful retry leaves that file behind, which is harmless.
+3. `snapshot`'s compensation removes the local source and frees the image, then delivers `image.failed` with the manifest the image is left with. Freeing the image first means an undeliverable event doesn't hold up the next job, and delivery stops after five attempts so an unreachable endpoint can't stall the unwind.
 
-Generation tells failures apart by whether another attempt could help. Invalid requests and unreadable sources fail permanently, while storage and network failures use Francis' attempt and backoff policy.
+`generate` classifies failures by whether a retry could help. Invalid requests and unreadable sources fail permanently, while storage and network errors follow Francis' attempt and backoff policy.
 
 ## Deadlines, placement and retention
 
-Each forward attempt and compensation uses `actors.workflowTimeout` as its execution budget, which starts only when a worker begins the attempt. The workflow also has an instance deadline of six times that value.
+Each forward attempt and compensation gets `actors.workflowTimeout` as its execution budget, counted from when a worker begins it. The workflow instance also has a deadline of six times that value.
 
-`images.maxConcurrentEncodes` becomes the workflow's per-host worker budget, which Francis shares across every step's queue and mirrors as a placement hint, so work can move to another host.
+`images.maxConcurrentEncodes` sets the workflow's per-host worker budget. Francis shares it across every step's queue and mirrors it as a placement hint, so work can move to another host.
 
-The source cache is local. A task placed away from the host that prepared the job downloads the source into its own cache, and the sweeper reclaims that copy after twice `actors.workflowTimeout`. libvips reads the cached file by its path, so the source never sits in the Go heap; an encode that fails because a sweep removed the file in the meantime is retried, which downloads it again.
+The source cache is per host. A task that runs away from the host that prepared the job downloads the source into its own cache, and the sweeper removes that copy after twice `actors.workflowTimeout`. libvips reads the cached file by its path, so the source never sits in the Go heap. An encode that fails because a sweep removed the file is retried, which downloads it again.
 
-`actors.completedWorkflowRetention` applies to completed, failed and cancelled journals, and to the image actor's history. After it, the status endpoint returns `404`, and the manifest in object storage remains the durable record.
+`actors.completedWorkflowRetention` applies to completed, failed and cancelled journals, and to the image actor's history. Once it passes, the status endpoint returns `404`, and the manifest in object storage remains the durable record.
 
-The end-to-end tests in this package skip themselves under the race detector, so `make test-race` doesn't run them. `make test-workflows` runs them without it, and is the only end-to-end coverage of the workflow.
+## Tests
+
+The end-to-end workflow tests in this package skip themselves under the race detector, so `make test-race` doesn't run them. `make test-workflows` runs them without it, and is the only end-to-end coverage of the workflow.

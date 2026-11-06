@@ -68,8 +68,7 @@ func Prefix(namespace string, imageID uuid.UUID) string {
 
 // Split an image ID into two folder levels, so no single directory holds every newly created image of a namespace
 //
-// New image IDs are v4 so their leading characters spread evenly across the 256 folders
-// Images that kept a v7 ID from before keep their existing identity and object keys even though their timestamp prefix provides less fan-out
+// Image IDs are v4 so their leading characters spread evenly across the 256 folders
 func shard(imageID uuid.UUID) string {
 	s := imageID.String()
 	return s[:2] + "/" + s[2:4]
@@ -89,6 +88,7 @@ func ValidateFileID(fileID string) error {
 	if !fileIDRegex.MatchString(fileID) {
 		return fmt.Errorf("file ID '%s' is not 8 lowercase hex digits", fileID)
 	}
+
 	return nil
 }
 
@@ -99,10 +99,12 @@ func FileIDOf(key string) string {
 	if dot >= 0 {
 		name = name[:dot]
 	}
+
 	fileID := name[strings.LastIndexByte(name, '_')+1:]
 	if !fileIDRegex.MatchString(fileID) {
 		return ""
 	}
+
 	return fileID
 }
 
