@@ -41,8 +41,29 @@ Actor runtime: {{ include "provino.config.actorsRuntime" . }}{{ if eq (include "
      curl -i http://127.0.0.1:{{ int .Values.service.port }}/healthz
 
    The OpenAPI document is served at /.openapi.
+{{- if .Values.management.enabled }}
+{{- $managementScheme := ternary "https" "http" (eq (include "provino.config.managementUsesTLS" .) "true") }}
 
-2. Verify the install:
+2. Reach the management API, which dashboards such as https://my.gofrancis.dev connect to.
+
+   Inside the cluster it's at:
+
+     {{ $managementScheme }}://{{ include "provino.managementServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ int .Values.management.service.port }}
+
+   From your machine:
+
+     kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "provino.managementServiceName" . }} {{ int .Values.management.service.port }}:{{ int .Values.management.service.port }}
+
+   Add it as an endpoint in the dashboard, and sign in with one of the tokens in config.actors.management.
+   The dashboard's origin has to be listed in config.actors.management.allowedOrigins.
+{{- if ne $managementScheme "https" }}
+   A dashboard served over HTTPS can only call an endpoint served over HTTPS, or one on the browser's own
+   machine such as the port-forward above: set config.actors.management.tls, or terminate TLS in front of
+   the Service.
+{{- end }}
+{{- end }}
+
+{{ if .Values.management.enabled }}3{{ else }}2{{ end }}. Verify the install:
 
      helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
 {{- if and (eq (int .Values.replicaCount) 1) (not .Values.existingConfigSecret) (eq (include "provino.config.actorsRuntime" .) "embedded") (not (include "provino.config.usesPostgres" .)) }}

@@ -120,6 +120,14 @@ A failed job leaves the image as it found it. Compensations run in reverse step 
 
 `generate` classifies failures by whether a retry could help. Invalid requests and unreadable sources fail permanently, while storage and network errors follow Francis' attempt and backoff policy.
 
+### Management actions
+
+The management API (`actors.management`) can act on a job's workflow instance directly, and every action lands on a path this workflow already handles:
+
+- A cancelled instance unwinds through the same compensations as a failed one, and the job service reports it as `failed` with the instance's cause as the error.
+- A suspended instance hasn't ended, so `heal` keeps its image busy until it resumes or ends.
+- Draining a host makes `Host.Run` return `ErrAdministrativeDrain`, and the process exits. Its workflow tasks are delivered again to another host, or to the same one once it restarts.
+
 ## Deadlines, placement and retention
 
 Each forward attempt and compensation gets `actors.workflowTimeout` as its execution budget, counted from when a worker begins it. The workflow instance also has a deadline of six times that value.

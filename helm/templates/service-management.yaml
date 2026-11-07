@@ -1,0 +1,46 @@
+{{- include "provino.validateValues" . -}}
+{{- if .Values.management.enabled }}
+{{- $service := .Values.management.service }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "provino.managementServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provino.labels" . | nindent 4 }}
+  {{- if or $service.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ $service.type }}
+  {{- /* The API server rejects externalTrafficPolicy on a ClusterIP Service */}}
+  {{- if and $service.externalTrafficPolicy (has $service.type (list "NodePort" "LoadBalancer")) }}
+  externalTrafficPolicy: {{ $service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if eq $service.type "LoadBalancer" }}
+  {{- with $service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  {{- with $service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  {{- /* Every replica that serves the management API can inspect and manage the whole cluster, so any of them can answer */}}
+  ports:
+    - name: management
+      port: {{ int $service.port }}
+      targetPort: management
+      protocol: TCP
+      {{- if and $service.nodePort (has $service.type (list "NodePort" "LoadBalancer")) }}
+      nodePort: {{ int $service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "provino.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -56,6 +56,10 @@ const APIKeyPrefix = "pvk_"
 // Instances that share one configuration file each need their own address, which only the environment can give them
 const EnvActorsAddress = "PROVINO_ACTORS_ADDRESS"
 
+// Minimum length of a management API token, which Francis enforces when the host starts
+// The configuration checks it as well, so the error names the option at fault
+const minManagementTokenLength = 32
+
 // Name of the folder inside the system temporary directory the source images are cached in when 'storage.sourceCache' is not set
 const defaultSourceCacheDirName = "provino-sources"
 
@@ -149,7 +153,6 @@ type ConfigServerTLS struct {
 	// Path where to load TLS certificates from
 	// Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificates when they're updated.
 	// If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located, when both files are there.
-	// Startup fails when a folder named here doesn't contain both files, or when either folder contains only one of them.
 	// +default the same folder as the `config.yaml` file
 	Path string `yaml:"path"`
 
@@ -510,6 +513,9 @@ type ConfigActors struct {
 	// Configuration for connecting to a standalone Francis runtime, used when `actors.runtime` is `external`
 	External ConfigActorsExternal `yaml:"external"`
 
+	// Francis management API of the embedded actor runtime, which dashboards such as https://my.gofrancis.dev connect to
+	Management ConfigActorsManagement `yaml:"management"`
+
 	// How long each workflow handler attempt and compensation may execute after a worker starts it
 	// Queue wait and retry backoff do not consume this execution budget
 	// The complete workflow has a separate backstop of six times this value, which starts when the job starts
@@ -548,6 +554,51 @@ type ConfigActorsExternal struct {
 	// This is unsafe: anyone able to intercept that first connection can impersonate the runtime, which also exposes the bootstrap token when authenticating with a JWT.
 	// Exactly one of the CA options and this one must be set when `actors.runtime` is `external`.
 	UnsafeNoPinnedCA bool `yaml:"unsafeNoPinnedCA"` //nolint:tagliatelle
+}
+
+// ConfigActorsManagement configures the Francis management API served by the embedded actor runtime
+type ConfigActorsManagement struct {
+	// If true, the embedded actor runtime serves the Francis management REST API, which dashboards such as https://my.gofrancis.dev connect to
+	// It lists the actor hosts, the actors, and the jobs' workflow instances with their inputs and outputs, and its management tokens can also drain a host and cancel, suspend, or resume a job
+	// Only available when `actors.runtime` is `embedded`: a standalone Francis runtime can serve the management API itself
+	Enabled bool `yaml:"enabled"`
+
+	// Address (`host:port`) the management API listens on
+	// +default "127.0.0.1:7401"
+	Bind string `yaml:"bind"`
+
+	// API tokens that can read everything the management API exposes, but can't take any action
+	// Each token must be at least 32 characters long, such as one generated with `openssl rand -base64 32`
+	// At least one token, in this list or in `managementTokens`, is required when the management API is enabled
+	ReadOnlyTokens []string `yaml:"readOnlyTokens"`
+
+	// API tokens that can also take actions, such as draining a host or cancelling a job
+	// Each token must be at least 32 characters long, and must not appear in `readOnlyTokens` too
+	ManagementTokens []string `yaml:"managementTokens"`
+
+	// Origins browsers may call the management API from, such as `https://my.gofrancis.dev` for the hosted dashboard
+	// Setting `*` allows any origin
+	// +example ["https://my.gofrancis.dev"]
+	AllowedOrigins []string `yaml:"allowedOrigins"`
+
+	// TLS configuration for the management API, which is served over plain HTTP when none is set
+	// A dashboard served over HTTPS, such as https://my.gofrancis.dev, can only call an API that is served over HTTPS too, unless the API is on the browser's own machine
+	TLS ConfigActorsManagementTLS `yaml:"tls"`
+}
+
+// ConfigActorsManagementTLS holds the TLS configuration of the management API
+type ConfigActorsManagementTLS struct {
+	// Path where to load the TLS certificate and key from
+	// Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificate when it's renewed.
+	Path string `yaml:"path"`
+
+	// Full, PEM-encoded TLS certificate
+	// Using `certPEM` and `keyPEM` is an alternative method of passing the TLS certificate than using `path`, and the two must be set together.
+	CertPEM string `yaml:"certPEM"` //nolint:tagliatelle
+
+	// Full, PEM-encoded TLS key
+	// Using `certPEM` and `keyPEM` is an alternative method of passing the TLS certificate than using `path`, and the two must be set together.
+	KeyPEM string `yaml:"keyPEM"` //nolint:tagliatelle
 }
 
 // ConfigLogs represents logging configuration
@@ -619,6 +670,12 @@ func (c *Config) Validate(logger *slog.Logger) error {
 	}
 
 	err = c.validateActors(logger)
+	if err != nil {
+		return err
+	}
+
+	// The management API comes after the actors, since whether it can be enabled depends on the runtime they selected
+	err = c.validateManagement()
 	if err != nil {
 		return err
 	}
@@ -1191,6 +1248,103 @@ func (c *Config) resolveRuntimePSK(logger *slog.Logger) error {
 	c.internal.runtimePSK = buf
 
 	logger.Debug("No 'actors.runtimePSK' set; a random key will be generated for this process lifetime")
+
+	return nil
+}
+
+// Validate the "actors.management" section
+// Francis checks the bind address and the tokens again when the host starts, but checking them here names the option at fault and fails before anything else starts
+func (c *Config) validateManagement() error {
+	mgmt := &c.Actors.Management
+
+	// Nothing else in the section matters while the API is off
+	if !mgmt.Enabled {
+		return nil
+	}
+
+	// A standalone runtime serves its own management API, configured in its own file, so enabling this one with it is a mistake rather than something to ignore
+	if c.Actors.Runtime != ActorRuntimeEmbedded {
+		return errors.New("configuration option 'actors.management.enabled' requires 'actors.runtime' to be 'embedded'")
+	}
+
+	// A dashboard needs to know where to connect, so the port can't be left for the system to pick
+	_, bindPort, err := net.SplitHostPort(mgmt.Bind)
+	if err != nil {
+		return fmt.Errorf("configuration option 'actors.management.bind' is invalid: must be in the format 'host:port': %w", err)
+	}
+	port, err := strconv.Atoi(bindPort)
+	if err != nil || port <= 0 || port > 65535 {
+		return errors.New("configuration option 'actors.management.bind' is invalid: port is not valid")
+	}
+
+	// Every token grants access on its own, so each must be long enough and appear in only one of the two lists, which grant different scopes
+	if len(mgmt.ReadOnlyTokens) == 0 && len(mgmt.ManagementTokens) == 0 {
+		return errors.New("configuration options 'actors.management.readOnlyTokens' and 'actors.management.managementTokens' must contain at least one token between them when 'actors.management.enabled' is true")
+	}
+	seen := make(map[string]struct{}, len(mgmt.ReadOnlyTokens)+len(mgmt.ManagementTokens))
+	lists := []struct {
+		option string
+		tokens []string
+	}{
+		{option: "readOnlyTokens", tokens: mgmt.ReadOnlyTokens},
+		{option: "managementTokens", tokens: mgmt.ManagementTokens},
+	}
+	for _, list := range lists {
+		for i, token := range list.tokens {
+			if len(token) < minManagementTokenLength {
+				return fmt.Errorf("configuration option 'actors.management.%s' contains a token at index %d that is shorter than %d characters", list.option, i, minManagementTokenLength)
+			}
+
+			_, dup := seen[token]
+			if dup {
+				return fmt.Errorf("configuration option 'actors.management.%s' contains a token at index %d that was already listed: every token must be unique across 'readOnlyTokens' and 'managementTokens'", list.option, i)
+			}
+			seen[token] = struct{}{}
+		}
+	}
+
+	// An origin is compared against the Origin header, so it's normalized the way browsers send it, like the ones in 'server.corsAllowedOrigins'
+	for i, origin := range mgmt.AllowedOrigins {
+		origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+		if origin != "*" && !isHTTPOrigin(origin) {
+			return fmt.Errorf("configuration option 'actors.management.allowedOrigins' contains '%s', which is neither an absolute HTTP origin nor '*'", mgmt.AllowedOrigins[i])
+		}
+
+		mgmt.AllowedOrigins[i] = origin
+	}
+
+	return c.validateManagementTLS()
+}
+
+// Validate the TLS options of the management API, so an API that was meant to serve HTTPS fails to start rather than quietly serving plain HTTP
+// The certificate itself is parsed when the host is created, which fails on a value that isn't one
+func (c *Config) validateManagementTLS() error {
+	tlsCfg := c.Actors.Management.TLS
+
+	// A certificate comes from exactly one place, and PEM values without each other can't make one
+	hasCert := tlsCfg.CertPEM != ""
+	hasKey := tlsCfg.KeyPEM != ""
+	switch {
+	case hasCert != hasKey:
+		return errors.New("configuration options 'actors.management.tls.certPEM' and 'actors.management.tls.keyPEM' must be set together")
+	case hasCert && tlsCfg.Path != "":
+		return errors.New("configuration option 'actors.management.tls.path' cannot be set together with 'actors.management.tls.certPEM' and 'actors.management.tls.keyPEM'")
+	case hasCert, tlsCfg.Path == "":
+		return nil
+	}
+
+	// Unlike the API server's, this folder is never implied, so a folder without both files is always a mistake
+	certFound, err := regularFileExists(filepath.Join(tlsCfg.Path, tlsCertFileName))
+	if err != nil {
+		return fmt.Errorf("failed to look for the management API's TLS certificate in '%s': %w", tlsCfg.Path, err)
+	}
+	keyFound, err := regularFileExists(filepath.Join(tlsCfg.Path, tlsKeyFileName))
+	if err != nil {
+		return fmt.Errorf("failed to look for the management API's TLS key in '%s': %w", tlsCfg.Path, err)
+	}
+	if !certFound || !keyFound {
+		return fmt.Errorf("configuration option 'actors.management.tls.path' names '%s', which doesn't contain both '%s' and '%s'", tlsCfg.Path, tlsCertFileName, tlsKeyFileName)
+	}
 
 	return nil
 }

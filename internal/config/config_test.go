@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,22 +76,23 @@ func TestValidateDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Authorizer.Type)
 }
 
+// Write the TLS files a folder holds into a new folder
+// The contents are parsed when the server starts, not when the configuration is validated, so they're placeholders
+func tlsFolder(t *testing.T, files ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range files {
+		err := os.WriteFile(filepath.Join(dir, name), []byte("pem"), 0o600)
+		require.NoError(t, err)
+	}
+	return dir
+}
+
 // The cache is a local folder rather than a DSN, and an operator that names one keeps it
 func TestValidateTLS(t *testing.T) {
-	// Write the TLS files a folder holds; the contents are parsed when the server starts, not here
-	folder := func(t *testing.T, files ...string) string {
-		t.Helper()
-		dir := t.TempDir()
-		for _, name := range files {
-			err := os.WriteFile(filepath.Join(dir, name), []byte("pem"), 0o600)
-			require.NoError(t, err)
-		}
-		return dir
-	}
-
 	t.Run("no TLS at all", func(t *testing.T) {
 		cfg := validConfigForTest()
-		cfg.SetLoadedConfigPath(filepath.Join(folder(t), "config.yaml"))
+		cfg.SetLoadedConfigPath(filepath.Join(tlsFolder(t), "config.yaml"))
 		err := cfg.Validate(testLogger())
 		require.NoError(t, err)
 	})
@@ -105,7 +107,7 @@ func TestValidateTLS(t *testing.T) {
 
 	t.Run("both files in the folder", func(t *testing.T) {
 		cfg := validConfigForTest()
-		cfg.Server.TLS.Path = folder(t, tlsCertFileName, tlsKeyFileName)
+		cfg.Server.TLS.Path = tlsFolder(t, tlsCertFileName, tlsKeyFileName)
 		err := cfg.Validate(testLogger())
 		require.NoError(t, err)
 	})
@@ -123,20 +125,20 @@ func TestValidateTLS(t *testing.T) {
 			message:   "must be set together",
 		},
 		"a path without the files": {
-			configure: func(cfg *Config) { cfg.Server.TLS.Path = folder(t) },
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = tlsFolder(t) },
 			message:   "doesn't contain",
 		},
 		"a path that doesn't exist": {
-			configure: func(cfg *Config) { cfg.Server.TLS.Path = filepath.Join(folder(t), "missing") },
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = filepath.Join(tlsFolder(t), "missing") },
 			message:   "doesn't contain",
 		},
 		"a path with only the certificate": {
-			configure: func(cfg *Config) { cfg.Server.TLS.Path = folder(t, tlsCertFileName) },
+			configure: func(cfg *Config) { cfg.Server.TLS.Path = tlsFolder(t, tlsCertFileName) },
 			message:   "contains only one of",
 		},
 		"only the key next to the configuration file": {
 			configure: func(cfg *Config) {
-				cfg.SetLoadedConfigPath(filepath.Join(folder(t, tlsKeyFileName), "config.yaml"))
+				cfg.SetLoadedConfigPath(filepath.Join(tlsFolder(t, tlsKeyFileName), "config.yaml"))
 			},
 			message: "contains only one of",
 		},
@@ -159,6 +161,131 @@ func TestValidateSourceCache(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/cache/provino", cfg.Storage.SourceCache)
+}
+
+// A configuration that enables the management API with the least it needs, for the tests to change one option of
+func managementConfig() *Config {
+	cfg := validConfigForTest()
+	cfg.Actors.Management.Enabled = true
+	cfg.Actors.Management.ReadOnlyTokens = []string{strings.Repeat("r", 32)}
+	return cfg
+}
+
+func TestValidateManagement(t *testing.T) {
+	// Nothing in the section is checked while the API is off, so a half-written section doesn't stop the service from starting
+	t.Run("ignores the options while disabled", func(t *testing.T) {
+		cfg := validConfigForTest()
+		cfg.Actors.Management.ReadOnlyTokens = []string{"short"}
+		cfg.Actors.Management.Bind = "not an address"
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	t.Run("listens on loopback by default", func(t *testing.T) {
+		cfg := managementConfig()
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1:7401", cfg.Actors.Management.Bind)
+	})
+
+	t.Run("normalizes the allowed origins", func(t *testing.T) {
+		cfg := managementConfig()
+		cfg.Actors.Management.AllowedOrigins = []string{" https://my.gofrancis.dev/ ", "*"}
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://my.gofrancis.dev", "*"}, cfg.Actors.Management.AllowedOrigins)
+	})
+
+	t.Run("accepts tokens in both lists", func(t *testing.T) {
+		cfg := managementConfig()
+		cfg.Actors.Management.ManagementTokens = []string{strings.Repeat("m", 32)}
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	t.Run("loads the certificate from a folder", func(t *testing.T) {
+		cfg := managementConfig()
+		cfg.Actors.Management.TLS.Path = tlsFolder(t, tlsCertFileName, tlsKeyFileName)
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	t.Run("loads the certificate from PEM values", func(t *testing.T) {
+		cfg := managementConfig()
+		cfg.Actors.Management.TLS.CertPEM = "cert"
+		cfg.Actors.Management.TLS.KeyPEM = "key"
+
+		err := cfg.Validate(testLogger())
+		require.NoError(t, err)
+	})
+
+	failures := map[string]struct {
+		configure func(cfg *Config)
+		message   string
+	}{
+		"an external runtime": {
+			configure: func(cfg *Config) {
+				external := externalConfig()
+				external.Actors.Management = cfg.Actors.Management
+				*cfg = *external
+			},
+			message: "requires 'actors.runtime' to be 'embedded'",
+		},
+		"a bind address without a port": {
+			configure: func(cfg *Config) { cfg.Actors.Management.Bind = "127.0.0.1" },
+			message:   "'actors.management.bind' is invalid",
+		},
+		"a bind address with port zero": {
+			configure: func(cfg *Config) { cfg.Actors.Management.Bind = "127.0.0.1:0" },
+			message:   "port is not valid",
+		},
+		"no tokens": {
+			configure: func(cfg *Config) { cfg.Actors.Management.ReadOnlyTokens = nil },
+			message:   "at least one token",
+		},
+		"a short token": {
+			configure: func(cfg *Config) { cfg.Actors.Management.ManagementTokens = []string{"too-short"} },
+			message:   "shorter than 32 characters",
+		},
+		"a token in both lists": {
+			configure: func(cfg *Config) { cfg.Actors.Management.ManagementTokens = cfg.Actors.Management.ReadOnlyTokens },
+			message:   "already listed",
+		},
+		"an origin with a path": {
+			configure: func(cfg *Config) { cfg.Actors.Management.AllowedOrigins = []string{"https://my.gofrancis.dev/app"} },
+			message:   "'actors.management.allowedOrigins' contains",
+		},
+		"a certificate PEM without its key": {
+			configure: func(cfg *Config) { cfg.Actors.Management.TLS.CertPEM = "cert" },
+			message:   "must be set together",
+		},
+		"PEM values and a folder": {
+			configure: func(cfg *Config) {
+				cfg.Actors.Management.TLS.CertPEM = "cert"
+				cfg.Actors.Management.TLS.KeyPEM = "key"
+				cfg.Actors.Management.TLS.Path = tlsFolder(t, tlsCertFileName, tlsKeyFileName)
+			},
+			message: "cannot be set together",
+		},
+		"a folder with only the certificate": {
+			configure: func(cfg *Config) { cfg.Actors.Management.TLS.Path = tlsFolder(t, tlsCertFileName) },
+			message:   "doesn't contain both",
+		},
+	}
+	for name, tt := range failures {
+		t.Run("rejects "+name, func(t *testing.T) {
+			cfg := managementConfig()
+			tt.configure(cfg)
+
+			err := cfg.Validate(testLogger())
+			require.ErrorContains(t, err, tt.message)
+		})
+	}
 }
 
 func TestValidateAuth(t *testing.T) {

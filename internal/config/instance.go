@@ -64,6 +64,9 @@ func GetDefaultConfig() *Config {
 			Runtime:                    ActorRuntimeEmbedded,
 			Address:                    "127.0.0.1:7571",
 			Database:                   "sqlite://./data/actors.db",
+			Management: ConfigActorsManagement{
+				Bind: "127.0.0.1:7401",
+			},
 			WorkflowTimeout:            10 * time.Minute,
 			CompletedWorkflowRetention: 24 * time.Hour,
 		},

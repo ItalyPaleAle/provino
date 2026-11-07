@@ -108,6 +108,11 @@ spec:
             - name: peers
               containerPort: {{ int .Values.ports.peers }}
               protocol: UDP
+            {{- if .Values.management.enabled }}
+            - name: management
+              containerPort: {{ int .Values.ports.management }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: PROVINO_CONFIG
               value: /etc/provino/config.yaml

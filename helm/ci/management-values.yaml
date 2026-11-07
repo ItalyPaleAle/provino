@@ -1,0 +1,35 @@
+# A single replica serving the management API over HTTPS, on a Service that a tailnet or other private network exposes
+config:
+  auth:
+    apiKeys:
+      - id: backend
+        key: pvk_0123456789abcdefghijklmnopqrstuv
+        scopes: [server]
+  actors:
+    management:
+      readOnlyTokens:
+        - lint-read-only-token-0123456789abcdef
+      managementTokens:
+        - lint-management-token-0123456789abcdef
+      allowedOrigins:
+        - https://my.gofrancis.dev
+      tls:
+        path: /etc/provino-management-tls
+management:
+  enabled: true
+  service:
+    annotations:
+      tailscale.com/expose: "true"
+extraVolumes:
+  - name: management-tls
+    secret:
+      secretName: provino-management-tls
+      items:
+        - key: tls.crt
+          path: tls-cert.pem
+        - key: tls.key
+          path: tls-key.pem
+extraVolumeMounts:
+  - name: management-tls
+    mountPath: /etc/provino-management-tls
+    readOnly: true

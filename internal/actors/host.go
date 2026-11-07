@@ -15,6 +15,7 @@ import (
 	"github.com/italypaleale/francis/host"
 	"github.com/italypaleale/francis/host/local"
 	"github.com/italypaleale/francis/host/remote"
+	"github.com/italypaleale/go-kit/httpserver/tlsconfig"
 	"github.com/italypaleale/go-kit/utils"
 
 	"github.com/italypaleale/provino/internal/config"
@@ -45,6 +46,10 @@ type Runtime struct {
 	CompletedWorkflowRetention time.Duration
 }
 
+// ErrAdministrativeDrain is returned by Run after the host was drained through the management API
+// A drained host can't run again, so the process should exit for a new one to take its place
+var ErrAdministrativeDrain = host.ErrAdministrativeDrain
+
 // Host runs the Francis actor host that executes the jobs
 //
 // The runtime backing it is chosen by "actors.runtime": embedded in this process (Francis' "local" topology), which needs no control plane to be deployed alongside the service, or a standalone Francis runtime this process only connects to (the "remote" topology), which is what scaling past a handful of instances wants
@@ -55,6 +60,9 @@ type Host struct {
 	ingestRateLimiter *ratelimit.RateLimitService
 	statusRateLimiter *ratelimit.RateLimitService
 	sourceCache       *sourcecache.Cache
+
+	// Starts reloading the management API's TLS certificate when its files change, or nil when there's nothing to watch
+	managementCertWatch tlsconfig.CertWatchFn
 }
 
 // NewHostOpts contains the options for NewHost
@@ -92,12 +100,16 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 	}
 
 	// The topology decides how the host is created, and nothing else
-	var h host.Host
+	// Only the embedded runtime can serve the management API, so only it can have a certificate to watch
+	var (
+		h                   host.Host
+		managementCertWatch tlsconfig.CertWatchFn
+	)
 	switch cfg.Actors.Runtime {
 	case config.ActorRuntimeExternal:
 		h, err = newExternalHost(cfg, logger)
 	default:
-		h, err = newEmbeddedHost(cfg, logger, opts.alarmsPollInterval)
+		h, managementCertWatch, err = newEmbeddedHost(cfg, logger, opts.alarmsPollInterval)
 	}
 	if err != nil {
 		return nil, err
@@ -161,9 +173,10 @@ func NewHost(opts NewHostOpts) (*Host, error) {
 			service: h.Service(),
 			jobs:    jobs,
 		},
-		ingestRateLimiter: ingestRateLimiter.Service(h.Service()),
-		statusRateLimiter: statusRateLimiter.Service(h.Service()),
-		sourceCache:       sourceCache,
+		ingestRateLimiter:   ingestRateLimiter.Service(h.Service()),
+		statusRateLimiter:   statusRateLimiter.Service(h.Service()),
+		sourceCache:         sourceCache,
+		managementCertWatch: managementCertWatch,
 	}, nil
 }
 
@@ -218,6 +231,15 @@ func (h *Host) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Watch the management API's certificate for as long as the host serves the API, so a renewed certificate is picked up without a restart
+	// The watcher runs in the background until the context is canceled, and failing to start it is fatal, as it is for the API server's certificate
+	if h.managementCertWatch != nil {
+		err := h.managementCertWatch(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to watch for the management API's TLS certificate: %w", err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		_ = h.sourceCache.Run(ctx)
@@ -236,16 +258,17 @@ func (h *Host) Run(ctx context.Context) error {
 
 // Create the host that runs the actor runtime inside this process
 // This process is both the actor host and its own control plane, which is why it's the one that needs a database
-func newEmbeddedHost(cfg *config.Config, logger *slog.Logger, pollIntervalOverride time.Duration) (host.Host, error) {
+// It also returns the function that watches the management API's certificate, which is nil unless the API loads one from a folder
+func newEmbeddedHost(cfg *config.Config, logger *slog.Logger, pollIntervalOverride time.Duration) (host.Host, tlsconfig.CertWatchFn, error) {
 	providerOpt, err := providerOption(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	pollInterval := utils.PositiveOr(pollIntervalOverride, 30*time.Second)
 
 	// The runtime PSK derives the cluster CA the hosts use to authenticate each other with mTLS, which only matters once a second instance shares the same database
-	h, err := local.NewHost(
+	hostOpts := []local.HostOption{
 		local.WithAddress(cfg.Actors.Address),
 		local.WithBindAddress(cfg.Actors.BindAddress),
 		local.WithBindPort(cfg.Actors.BindPort),
@@ -254,12 +277,45 @@ func newEmbeddedHost(cfg *config.Config, logger *slog.Logger, pollIntervalOverri
 		local.WithAlarmsPollInterval(pollInterval),
 		local.WithAlarmsFetchAheadInterval(pollInterval),
 		providerOpt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create the actor host: %w", err)
 	}
 
-	return h, nil
+	// The management API is served by the host itself, which runs it for as long as the host runs
+	var certWatch tlsconfig.CertWatchFn
+	if cfg.Actors.Management.Enabled {
+		var managementOpt local.HostOption
+		managementOpt, certWatch, err = managementOption(cfg.Actors.Management)
+		if err != nil {
+			return nil, nil, err
+		}
+		hostOpts = append(hostOpts, managementOpt)
+	}
+
+	h, err := local.NewHost(hostOpts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create the actor host: %w", err)
+	}
+
+	return h, certWatch, nil
+}
+
+// Build the host option that enables the Francis management API, along with the function that watches its certificate
+// The configuration has already checked the tokens and the TLS options, so loading the certificate is the only thing left that can fail here
+func managementOption(mgmt config.ConfigActorsManagement) (local.HostOption, tlsconfig.CertWatchFn, error) {
+	// A nil TLS configuration serves plain HTTP, which is the case when neither a folder nor PEM values were configured
+	tlsConfig, certWatch, err := tlsconfig.Load(mgmt.TLS.Path, mgmt.TLS.CertPEM, mgmt.TLS.KeyPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load the management API's TLS configuration: %w", err)
+	}
+
+	opt := local.WithManagementAPI(local.ManagementOptions{
+		Bind:             mgmt.Bind,
+		ReadOnlyTokens:   mgmt.ReadOnlyTokens,
+		ManagementTokens: mgmt.ManagementTokens,
+		AllowedOrigins:   mgmt.AllowedOrigins,
+		TLSConfig:        tlsConfig,
+	})
+
+	return opt, certWatch, nil
 }
 
 // Create the host that connects to a standalone Francis runtime

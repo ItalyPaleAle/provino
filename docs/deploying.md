@@ -165,6 +165,38 @@ When the hosts have less memory than they need, set `images.maxConcurrentEncodes
 
 The status of a finished job is kept for `actors.completedWorkflowRetention` (24 hours by default). After that, the job routes answer `404`, and the image's manifest is the durable record of what the job produced.
 
+### The management API
+
+With the embedded runtime, provino can serve the [Francis management API](https://gofrancis.dev/docs/management-api/), which dashboards such as the hosted one at [my.gofrancis.dev](https://my.gofrancis.dev) connect to. It shows the actor hosts, the image actors, and every job's workflow instance with its input and output. Management tokens can also drain a host, and cancel, suspend or resume a job. It's off by default:
+
+```yaml
+actors:
+  management:
+    enabled: true
+    # The default, which only accepts connections from this machine
+    bind: "127.0.0.1:7401"
+    # Each at least 32 characters long, such as one from `openssl rand -base64 32`
+    readOnlyTokens: ["..."]
+    managementTokens: ["..."]
+    allowedOrigins: ["https://my.gofrancis.dev"]
+```
+
+Read-only tokens can see everything the API shows, including the jobs' inputs, so treat both kinds as secrets, and keep the API off the public internet. With an external runtime, enable the management API of the Francis runtime instead.
+
+Jobs respond to the dashboard's actions like this:
+
+- Cancelling a job unwinds it the way a failure does: the image is left as the job found it, `image.failed` is delivered, and the job's status becomes `failed`.
+- A suspended job keeps its image busy until it resumes or ends, so new jobs for that image get `409 image_busy` in the meantime. Its status stays `running`.
+- Draining a host stops its actor host for good, so provino exits with a non-zero code for its supervisor to start it again as a new host. The jobs it was running carry on, on another host or after the restart.
+
+#### Reaching it from a dashboard
+
+The hosted dashboard runs in the browser and calls the API directly, so the API has to be reachable from the browser's machine. The dashboard is served over HTTPS, so the API has to be too, unless it's on the browser's own machine.
+
+In a container, bind to `0.0.0.0:7401` inside it, and publish the port only on the address it should be reachable at.
+
+Then add the endpoint in the dashboard by its `https://` URL, and sign in with one of the tokens. On Kubernetes, the chart's [Management API](../helm/README.md#management-api) section covers the Service and the certificate.
+
 ## The source cache
 
 Every variant of an image is encoded from the same original, so a job downloads it once into `storage.sourceCache`, a folder on the local disk. It defaults to a folder in the system temporary directory, and in a container it belongs on writable ephemeral storage. An upload also leaves a copy there as it streams in, so the job that follows usually doesn't download anything.

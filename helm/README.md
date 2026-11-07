@@ -60,6 +60,7 @@ The chart sets a few options itself, and fails the install if `config` sets them
 
 - `server.bind` and `server.port` come from `ports.http`, since the container port, the probes and the Services all depend on them.
 - `actors.address`, `actors.bindAddress` and `actors.bindPort` come from the pod. Every pod advertises its own IP to the other actor hosts, which a shared config file can't express, so the chart passes `$(POD_IP):<ports.peers>` in the `PROVINO_ACTORS_ADDRESS` env var, which overrides `actors.address`.
+- `actors.management.enabled` and `actors.management.bind` come from `management.enabled` and `ports.management`, since the container port and the [management Service](#management-api) depend on them.
 
 Everything else keeps provino's defaults when it's left out. Those defaults are relative to the image's working directory, `/var/lib/provino`, so the data volume is mounted at `/var/lib/provino/data`, where `storage.originals`, `storage.variants` and the SQLite `actors.database` point.
 
@@ -76,7 +77,7 @@ helm install provino oci://ghcr.io/italypaleale/charts/provino -n provino \
   --set existingConfigSecret=provino-config
 ```
 
-With `existingConfigSecret` the chart can't look inside the file, so its checks don't apply. The file must leave `server.bind` unset (or `0.0.0.0`) and set `server.port` to `ports.http` if that isn't 3000. The chart still sets the actor address through the environment.
+With `existingConfigSecret` the chart can't look inside the file, so its checks don't apply. The file must leave `server.bind` unset (or `0.0.0.0`) and set `server.port` to `ports.http` if that isn't 3000. With `management.enabled`, it must also set `actors.management.enabled` and bind `actors.management.bind` to `0.0.0.0` on `ports.management`. The chart still sets the actor address through the environment.
 
 A credential that a storage DSN names by environment variable, such as the `tokenEnv` of a Vercel Blob store, can come from its own Secret with `extraEnvFrom`:
 
@@ -169,6 +170,52 @@ The proxy's limit on request bodies has to be at least `config.images.maxUploadS
 
 The probes use HTTPS when `config.server.tls` names a certificate, and HTTP otherwise.
 
+## Management API
+
+The embedded actor runtime can serve the [Francis management API](https://gofrancis.dev/docs/management-api/), which dashboards such as the hosted one at [my.gofrancis.dev](https://my.gofrancis.dev) connect to. It lists the actor hosts, the actors, and the jobs' workflow instances with their inputs and outputs, and its management tokens can also drain a pod's host and cancel, suspend or resume a job. It's off by default, and no port is opened until it's enabled:
+
+```yaml
+management:
+  enabled: true
+config:
+  actors:
+    management:
+      # Each at least 32 characters long, such as one from `openssl rand -base64 32`
+      readOnlyTokens: ["<token>"]
+      managementTokens: ["<another token>"]
+      allowedOrigins: [https://my.gofrancis.dev]
+```
+
+When enabled, the chart binds the API to all interfaces on `ports.management` (TCP 7401 by default), and adds a `management` container port and a `<release>-management` Service in front of it. That Service is kept apart from the API's, so the management API can stay private while the API is public: keep it a `ClusterIP`, and reach it through `kubectl port-forward` or a VPN. Every replica serves the API, and any of them can inspect and manage the whole cluster.
+
+The tokens end up in the config Secret, so handle them like the other [secrets](#secrets). The API needs the embedded runtime: with an [external runtime](#external-francis-runtime), enable the management API of the Francis release instead.
+
+A dashboard served over HTTPS, as my.gofrancis.dev is, can only call an API served over HTTPS, or one on the browser's own machine, such as a port-forward to `127.0.0.1`. Either terminate TLS in front of the Service, or mount a certificate and point `config.actors.management.tls.path` at it. provino reloads the certificate when the files change, so a renewed one is picked up without a restart:
+
+```yaml
+config:
+  actors:
+    management:
+      tls:
+        path: /etc/provino-management-tls
+extraVolumes:
+  - name: management-tls
+    secret:
+      # A kubernetes.io/tls Secret, for example one issued by cert-manager
+      secretName: provino-management-tls
+      items:
+        - key: tls.crt
+          path: tls-cert.pem
+        - key: tls.key
+          path: tls-key.pem
+extraVolumeMounts:
+  - name: management-tls
+    mountPath: /etc/provino-management-tls
+    readOnly: true
+```
+
+Draining a pod's host from the dashboard makes that pod's provino exit, and Kubernetes restarts it as a new host.
+
 ## External Francis runtime
 
 With `config.actors.runtime: external`, provino is only an actor host, and it joins a standalone Francis runtime that owns placement, scheduling, and the database. The [Francis chart](https://gofrancis.dev/docs/deploying-the-runtime/) deploys one. Its default JWT bootstrap accepts projected service account tokens, which this chart can mount:
@@ -237,6 +284,7 @@ The identity provider has to trust the cluster's service account issuer for this
 | `existingConfigSecretKey` | string | `config.yaml` | Key of the config file in `existingConfigSecret`. |
 | `ports.http` | int | `3000` | Port the API listens on, which the chart sets as `server.port`. |
 | `ports.peers` | int | `7571` | UDP port the actor hosts reach each other on. |
+| `ports.management` | int | `7401` | TCP port the [management API](#management-api) listens on, which the chart sets in `actors.management.bind`. |
 | `persistence.enabled` | bool | `true` | Mount a PersistentVolumeClaim at `/var/lib/provino/data`, rather than an emptyDir. |
 | `persistence.existingClaim` | string | `""` | Mount this claim instead of the one the chart creates. |
 | `persistence.storageClass` | string | `""` | StorageClass of the claim. Empty uses the default, `-` disables dynamic provisioning. |
@@ -285,6 +333,14 @@ The identity provider has to trust the cluster's service account issuer for this
 | `httpRoute.annotations` | object | `{}` | Extra annotations for the HTTPRoute. |
 | `httpRoute.parentRefs` | list | `[]` | Gateways to attach to. Required when enabled. |
 | `httpRoute.hostnames` | list | `[]` | Hostnames to match. |
+| `management.enabled` | bool | `false` | Serve the [management API](#management-api), whose tokens and allowed origins go in `config.actors.management`. |
+| `management.service.type` | string | `ClusterIP` | Type of the management Service. |
+| `management.service.port` | int | `7401` | Port the management Service exposes the API on. |
+| `management.service.nodePort` | int | `null` | Node port, for `NodePort` and `LoadBalancer`. |
+| `management.service.loadBalancerIP` | string | `""` | Requested load balancer IP. |
+| `management.service.loadBalancerSourceRanges` | list | `[]` | Source ranges allowed through the load balancer. |
+| `management.service.externalTrafficPolicy` | string | `""` | `Cluster` or `Local`, for `NodePort` and `LoadBalancer`. |
+| `management.service.annotations` | object | `{}` | Extra annotations for the management Service. |
 
 ### Scheduling and pod settings
 

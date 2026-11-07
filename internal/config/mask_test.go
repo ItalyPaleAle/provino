@@ -21,6 +21,9 @@ func TestStringMasksSecrets(t *testing.T) {
 		"postgres-password",
 		"runtime-psk",
 		"bootstrap-psk",
+		"management-read-only-token",
+		"management-token",
+		"management-tls-private-key",
 	}
 
 	cfg := validConfigForTest()
@@ -36,6 +39,9 @@ func TestStringMasksSecrets(t *testing.T) {
 	cfg.Actors.Database = "postgres://provino:postgres-password@db.example.com:5432/provino?sslmode=require"
 	cfg.Actors.RuntimePSK = "runtime-psk"
 	cfg.Actors.External.BootstrapPSK = "bootstrap-psk"
+	cfg.Actors.Management.ReadOnlyTokens = []string{"management-read-only-token"}
+	cfg.Actors.Management.ManagementTokens = []string{"management-token"}
+	cfg.Actors.Management.TLS.KeyPEM = "management-tls-private-key"
 
 	out := cfg.String()
 	for _, secret := range secrets {
@@ -57,6 +63,8 @@ func TestStringMasksSecrets(t *testing.T) {
 	assert.Equal(t, []string{"whsec_endpoint"}, cfg.Notify.Endpoints["app"].Auth.HMAC.Secrets)
 	assert.Equal(t, []string{"whsk_signing"}, cfg.Signing.Ed25519.Keys)
 	assert.Contains(t, cfg.Storage.Originals, "s3-secret-key")
+	assert.Equal(t, []string{"management-read-only-token"}, cfg.Actors.Management.ReadOnlyTokens)
+	assert.Equal(t, []string{"management-token"}, cfg.Actors.Management.ManagementTokens)
 }
 
 //nolint:gosec // The credentials in these tests are fixtures

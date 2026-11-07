@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"time"
 
 	configkit "github.com/italypaleale/go-kit/config"
@@ -215,6 +216,15 @@ func main() {
 	err = servicerunner.
 		NewServiceRunner(services...).
 		Run(ctx)
+
+	// A drain requested through the management API stops the actor host for good, so the process exits for its supervisor to start a new one, which joins as a new host
+	// It's an expected outcome rather than a failure, but the exit code is still non-zero so supervisors that only restart failed processes start a new one too
+	if errors.Is(err, actors.ErrAdministrativeDrain) {
+		log.Warn("The actor host was drained through the management API, so the process is exiting for a new one to take its place")
+		shutdowns.Run(log)
+		os.Exit(1)
+	}
+
 	if err != nil {
 		shutdowns.Run(log)
 		slogkit.FatalError(log, "Failed to run service", err)

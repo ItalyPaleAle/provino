@@ -56,6 +56,11 @@ func (c *Config) masked() *Config {
 	m.Actors.RuntimePSK = maskSecret(m.Actors.RuntimePSK)
 	m.Actors.External.BootstrapPSK = maskSecret(m.Actors.External.BootstrapPSK)
 
+	// Each management token grants access to the API on its own
+	m.Actors.Management.ReadOnlyTokens = maskSecrets(m.Actors.Management.ReadOnlyTokens)
+	m.Actors.Management.ManagementTokens = maskSecrets(m.Actors.Management.ManagementTokens)
+	m.Actors.Management.TLS.KeyPEM = maskSecret(m.Actors.Management.TLS.KeyPEM)
+
 	return &m
 }
 

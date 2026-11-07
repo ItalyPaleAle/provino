@@ -26,6 +26,7 @@ commonAnnotations: {}
 # It takes every option in config.md in the repository, except for the ones the chart sets itself:
 # - server.bind and server.port, from ports.http
 # - actors.address, actors.bindAddress, and actors.bindPort, from the pod's IP and ports.peers
+# - actors.management.enabled and actors.management.bind, from management.enabled and ports.management
 # Options left unset keep provino's defaults, which store everything in the data volume (see persistence): the originals and the variants, and the SQLite database of the embedded actor runtime
 # The file is rendered into a Secret, since it usually holds credentials: pass these values in a file that is kept out of source control, or use existingConfigSecret instead
 # At least one way for callers to authenticate is required
@@ -71,6 +72,8 @@ ports:
   # Port the actor hosts reach each other on, which is UDP because Francis speaks WebTransport over HTTP/3
   # Only other replicas of this release connect to it
   peers: 7571
+  # Port the management API listens on when management.enabled is true
+  management: 7401
 
 # Volume mounted at /var/lib/provino/data, which is where provino's defaults keep the originals, the variants, and the SQLite database of the embedded actor runtime
 # With object storage and Postgres configured nothing is written to it, so it can be disabled, which more than one replica requires unless existingClaim is a ReadWriteMany volume they share
@@ -138,6 +141,25 @@ httpRoute:
   #    sectionName: https
   hostnames: []
   #  - images.example.com
+
+# Francis management REST API of the embedded actor runtime, which dashboards such as https://my.gofrancis.dev connect to
+# It's off by default, and no port is opened until it's enabled
+# Enabling it sets config.actors.management.enabled and config.actors.management.bind, so the rest of its options go in config.actors.management: at least one token, and the origins allowed to call it
+# It needs the embedded actor runtime, since a standalone Francis runtime serves the management API itself
+# With existingConfigSecret, that Secret has to enable the management API and bind it to 0.0.0.0 on ports.management
+management:
+  enabled: false
+  # Service in front of the management API, kept apart from the API's so it can stay private while the API is public
+  service:
+    type: ClusterIP
+    # Port the Service exposes the management API on
+    port: 7401
+    # Only used when type is NodePort or LoadBalancer
+    nodePort: null
+    loadBalancerIP: ""
+    loadBalancerSourceRanges: []
+    externalTrafficPolicy: ""
+    annotations: {}
 
 serviceAccount:
   create: true

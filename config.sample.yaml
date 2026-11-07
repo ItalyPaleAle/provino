@@ -55,7 +55,6 @@ server:
     ##   Path where to load TLS certificates from
     ##   Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificates when they're updated.
     ##   If empty, certificates are loaded from the same folder where the loaded `config.yaml` is located, when both files are there.
-    ##   Startup fails when a folder named here doesn't contain both files, or when either folder contains only one of them.
     ## Default: the same folder as the `config.yaml` file
     #path: the same folder as the `config.yaml` file
 
@@ -498,6 +497,65 @@ actors:
     ##   This is unsafe: anyone able to intercept that first connection can impersonate the runtime, which also exposes the bootstrap token when authenticating with a JWT.
     ##   Exactly one of the CA options and this one must be set when `actors.runtime` is `external`.
     #unsafeNoPinnedCA: false
+
+  ## actors.management
+  ## Description:
+  ##   Francis management API of the embedded actor runtime, which dashboards such as https://my.gofrancis.dev connect to
+  management:
+    ## actors.management.enabled (boolean)
+    ## Description:
+    ##   If true, the embedded actor runtime serves the Francis management REST API, which dashboards such as https://my.gofrancis.dev connect to
+    ##   It lists the actor hosts, the actors, and the jobs' workflow instances with their inputs and outputs, and its management tokens can also drain a host and cancel, suspend, or resume a job
+    ##   Only available when `actors.runtime` is `embedded`: a standalone Francis runtime can serve the management API itself
+    #enabled: false
+
+    ## actors.management.bind (string)
+    ## Description:
+    ##   Address (`host:port`) the management API listens on
+    ## Default: "127.0.0.1:7401"
+    #bind: "127.0.0.1:7401"
+
+    ## actors.management.readOnlyTokens (list of strings)
+    ## Description:
+    ##   API tokens that can read everything the management API exposes, but can't take any action
+    ##   Each token must be at least 32 characters long, such as one generated with `openssl rand -base64 32`
+    ##   At least one token, in this list or in `managementTokens`, is required when the management API is enabled
+    #readOnlyTokens: []
+
+    ## actors.management.managementTokens (list of strings)
+    ## Description:
+    ##   API tokens that can also take actions, such as draining a host or cancelling a job
+    ##   Each token must be at least 32 characters long, and must not appear in `readOnlyTokens` too
+    #managementTokens: []
+
+    ## actors.management.allowedOrigins (list of strings)
+    ## Description:
+    ##   Origins browsers may call the management API from, such as `https://my.gofrancis.dev` for the hosted dashboard
+    ##   Setting `*` allows any origin
+    #allowedOrigins: ["https://my.gofrancis.dev"]
+
+    ## actors.management.tls
+    ## Description:
+    ##   TLS configuration for the management API, which is served over plain HTTP when none is set
+    ##   A dashboard served over HTTPS, such as https://my.gofrancis.dev, can only call an API that is served over HTTPS too, unless the API is on the browser's own machine
+    tls:
+      ## actors.management.tls.path (string)
+      ## Description:
+      ##   Path where to load the TLS certificate and key from
+      ##   Within the folder, the files must be named `tls-cert.pem` and `tls-key.pem`. The application watches for changes in this folder and automatically reloads the TLS certificate when it's renewed.
+      #path: ""
+
+      ## actors.management.tls.certPEM (string)
+      ## Description:
+      ##   Full, PEM-encoded TLS certificate
+      ##   Using `certPEM` and `keyPEM` is an alternative method of passing the TLS certificate than using `path`, and the two must be set together.
+      #certPEM: ""
+
+      ## actors.management.tls.keyPEM (string)
+      ## Description:
+      ##   Full, PEM-encoded TLS key
+      ##   Using `certPEM` and `keyPEM` is an alternative method of passing the TLS certificate than using `path`, and the two must be set together.
+      #keyPEM: ""
 
   ## actors.workflowTimeout (duration)
   ## Description:
