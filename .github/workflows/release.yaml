@@ -24,6 +24,7 @@ jobs:
       json: ${{ steps.meta.outputs.json }}
       labels: ${{ steps.meta.outputs.labels }}
       ldflags: ${{ steps.vars.outputs.ldflags }}
+      version: ${{ steps.vars.outputs.version }}
     steps:
       # Lowercase REPO_OWNER which is required for containers
       - name: Set lowercase REPO_OWNER
@@ -62,6 +63,7 @@ jobs:
           BUILD_LDFLAGS="-X ${BUILDINFO_PKG}.Production=1 -X ${BUILDINFO_PKG}.AppVersion=${BUILD_VERSION} -X ${BUILDINFO_PKG}.BuildId=${BUILD_ID} -X ${BUILDINFO_PKG}.BuildDate=${BUILD_DATE} -X ${BUILDINFO_PKG}.CommitHash=${COMMIT_HASH} -buildid=${BUILD_ID}"
 
           echo "ldflags=$BUILD_LDFLAGS" >> $GITHUB_OUTPUT
+          echo "version=$BUILD_VERSION" >> $GITHUB_OUTPUT
           echo "image=ghcr.io/${REPO_OWNER}/provino" >> $GITHUB_OUTPUT
 
           echo "BUILD_LDFLAGS: '$BUILD_LDFLAGS'"
@@ -122,12 +124,71 @@ jobs:
           echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> $GITHUB_ENV
 
       - name: Upload the digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          # Do not cache in release workflows
+          cache: false
+
+      # The SBOM must describe the binary that ships, and that binary only exists inside the image, so it is copied out of the image just pushed rather than built again on the runner
+      - name: Extract the binary from the image
+        env:
+          IMAGE: ${{ needs.metadata.outputs.image }}
+          DIGEST: ${{ steps.docker-build-push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -eo pipefail
+
+          # A container that is created but never started is enough to copy a file out of, and the distroless image has nothing to start anyway
+          CONTAINER_ID=$(docker create --platform "${PLATFORM}" "${IMAGE}@${DIGEST}")
+          mkdir -p "${RUNNER_TEMP}/bin"
+          docker cp -L "${CONTAINER_ID}:/bin/provino" "${RUNNER_TEMP}/bin/provino"
+          docker rm "${CONTAINER_ID}"
+
+          # This fails if the file is not a Go binary, and logs the module list the SBOM is generated from
+          go version -m "${RUNNER_TEMP}/bin/provino"
+
+      # One CycloneDX SBOM per architecture, generated from the module list that Go embeds in the binary
+      # It lists the Go modules only: libvips and the other system libraries in the image come from Debian packages, which Go's build information does not record
+      - name: Generate the SBOM
+        env:
+          # Pinned to an exact release that is at least a week old
+          # `go install pkg@version` ignores this repo's go.mod and verifies the downloaded modules against sum.golang.org
+          CYCLONEDX_GOMOD_VERSION: "v1.12.0"
+          BUILD_VERSION: ${{ needs.metadata.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -eo pipefail
+
+          GOBIN="${RUNNER_TEMP}/tools" go install "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${CYCLONEDX_GOMOD_VERSION}"
+
+          # The image was built without the repository's .git folder, so the binary records its own version as "(devel)" and the release version is passed in instead
+          # cyclonedx-gomod reads the build settings from the binary, but takes the GOOS and GOARCH in package URLs from `go env`, so they are set to match the image's platform
+          mkdir -p "${RUNNER_TEMP}/sbom"
+          GOOS="${PLATFORM%%/*}" GOARCH="${PLATFORM#*/}" "${RUNNER_TEMP}/tools/cyclonedx-gomod" bin \
+            -json \
+            -std \
+            -version "${BUILD_VERSION}" \
+            -output "${RUNNER_TEMP}/sbom/provino-${BUILD_VERSION}-${PLATFORM_PAIR}.cdx.json" \
+            "${RUNNER_TEMP}/bin/provino"
+
+          ls -al "${RUNNER_TEMP}/sbom"
+
+      # The SBOM is uploaded on every run, not only for tags, so a build from main can be inspected and a broken step shows up before a release
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/sbom/*
+          if-no-files-found: error
 
   # Combines the image of every architecture into the multi-arch index each tag points at
   manifest:
@@ -137,7 +198,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Download the digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
@@ -294,7 +355,8 @@ jobs:
           subject-digest: ${{ steps.helm-push.outputs.digest }}
           push-to-registry: true
 
-  # provino is container-only, so the release carries no assets: it marks the tag that the image and the chart published above were built from
+  # provino is container-only, so the release marks the tag that the image and the chart published above were built from
+  # Its only assets are the SBOMs of the binary in each architecture's image
   release:
     name: Publish release
     runs-on: ubuntu-26.04
@@ -304,6 +366,8 @@ jobs:
 
     permissions:
       contents: write
+      attestations: write
+      id-token: write
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -316,6 +380,21 @@ jobs:
         with:
           # Fetch the tag so its annotation message is available for release notes
           fetch-tags: true
+
+      # The container job uploads one SBOM per architecture
+      - name: Download the SBOMs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: .out
+          pattern: sbom-*
+          merge-multiple: true
+
+      # A single attestation covering every file attached to the release
+      # It runs before the release is created: once the release exists, a rerun stops at the immutability check below and could never add a missing attestation
+      - name: Attestation for release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        with:
+          subject-path: '.out/*'
 
       - name: Publish release
         run: |
@@ -353,12 +432,23 @@ jobs:
             notes_args=(--generate-notes)
           fi
 
+          shopt -s nullglob
+          assets=(.out/*)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "::error::No assets found in .out"
+            exit 1
+          fi
+
+          echo "Attaching ${#assets[@]} assets:"
+          printf '  %s\n' "${assets[@]}"
+
           # Never pass --draft: the release is published immediately, with no approval step
           gh release create "${TAG}" \
             --verify-tag \
             --title "${TAG}" \
             "${prerelease[@]}" \
-            "${notes_args[@]}"
+            "${notes_args[@]}" \
+            "${assets[@]}"
 
       - name: Job summary
         run: |

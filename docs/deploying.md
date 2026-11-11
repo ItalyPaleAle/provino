@@ -10,6 +10,8 @@ docker build -t provino .
 
 The image is distroless and runs as a non-root user.
 
+Each [GitHub release](https://github.com/italypaleale/provino/releases) has a CycloneDX SBOM for the binary in each architecture's image, named `provino-<version>-linux-<arch>.cdx.json`. It lists the Go modules compiled into the binary, but not libvips and the other system libraries the image copies in from Debian. The SBOMs carry a build provenance attestation, which `gh attestation verify <file> --repo italypaleale/provino` checks.
+
 The service reads its configuration from `PROVINO_CONFIG` if it's set, otherwise from `config.yaml` in the working directory, then `~/.provino/`, then `/etc/provino/`.
 
 The service answers `/healthz` as soon as its process does, and `/readyz` once its actor host has registered and it can run jobs, which is what a readiness probe should check.
