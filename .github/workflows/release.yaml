@@ -293,3 +293,78 @@ jobs:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/charts/provino'
           subject-digest: ${{ steps.helm-push.outputs.digest }}
           push-to-registry: true
+
+  # provino is container-only, so the release carries no assets: it marks the tag that the image and the chart published above were built from
+  release:
+    name: Publish release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    needs: [manifest, helm-chart]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Fetch the tag so its annotation message is available for release notes
+          fetch-tags: true
+
+      - name: Publish release
+        run: |
+          # Published releases are immutable: re-running the workflow on the same tag must fail, not overwrite
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::Release ${TAG} already exists, and published releases are immutable"
+            exit 1
+          fi
+
+          # Tags carrying a pre-release identifier (such as v1.2.0-rc.1) are marked as pre-releases
+          prerelease=()
+          if [[ "${TAG}" == *-* ]]; then
+            echo "Marking ${TAG} as a pre-release"
+            prerelease=(--prerelease)
+          fi
+
+          # An annotated tag carries a message; use it as the release notes
+          # A lightweight tag has no message, so fall back to auto-generated notes
+          # Strip any Git signature block from the tag message so it doesn't leak into the release notes
+          notes_args=()
+          tag_type=$(git tag -l --format='%(objecttype)' "${TAG}")
+          if [[ "${tag_type}" == "tag" ]]; then
+            tag_message=$(git tag -l --format='%(contents)' "${TAG}")
+            tag_signature=$(git tag -l --format='%(contents:signature)' "${TAG}")
+            if [[ -n "${tag_signature}" && "${tag_message}" == *"${tag_signature}" ]]; then
+              tag_message="${tag_message%"${tag_signature}"}"
+            fi
+            if [[ -n "${tag_message}" ]]; then
+              echo "Using tag annotation as release notes"
+              notes_args=(--notes "${tag_message}")
+            fi
+          fi
+          if [[ ${#notes_args[@]} -eq 0 ]]; then
+            echo "Tag has no annotation; auto-generating release notes"
+            notes_args=(--generate-notes)
+          fi
+
+          # Never pass --draft: the release is published immediately, with no approval step
+          gh release create "${TAG}" \
+            --verify-tag \
+            --title "${TAG}" \
+            "${prerelease[@]}" \
+            "${notes_args[@]}"
+
+      - name: Job summary
+        run: |
+          url=$(gh release view "${TAG}" --json url --jq '.url')
+          {
+            echo "## Release ${TAG}"
+            echo
+            echo "Published: <${url}>"
+          } >> "${GITHUB_STEP_SUMMARY}"
